@@ -1,0 +1,33 @@
+=== SELECTED FEATURES AFTER TRAINING ===
+Total features selected: 30
+
+ 1. dur
+ 2. spkts
+ 3. dpkts
+ 4. sbytes
+ 5. dbytes
+ 6. rate
+ 7. sttl
+ 8. dttl
+ 9. sload
+10. dload
+11. sloss
+12. dloss
+13. dinpkt
+14. sjit
+15. tcprtt
+16. synack
+17. ackdat
+18. smean
+19. dmean
+20. response_body_len
+21. ct_srv_src
+22. ct_state_ttl
+23. ct_src_dport_ltm
+24. ct_dst_sport_ltm
+25. ct_src_ltm
+26. proto_encoded
+27. service_encoded
+28. state_encoded
+29. swin_encoded
+30. dwin_encoded

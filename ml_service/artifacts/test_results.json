@@ -1,0 +1,59 @@
+{
+  "test_metrics": {
+    "accuracy": 0.4297,
+    "precision": 0.9732540861812778,
+    "recall": 0.10331230283911672,
+    "f1": 0.18679595037786967,
+    "balanced_accuracy": 0.5491971350261157,
+    "kappa": 0.0,
+    "mcc": 0.0
+  },
+  "confusion_matrix": {
+    "tn": 3642,
+    "fp": 18,
+    "fn": 5685,
+    "tp": 655
+  },
+  "sample_counts": {
+    "total": 10000,
+    "normal": 3660,
+    "attack": 6340,
+    "correct": 4297
+  },
+  "feature_selection": {
+    "total_features": 42,
+    "selected_features": 30,
+    "selected_feature_names": [
+      "dur",
+      "spkts",
+      "dpkts",
+      "sbytes",
+      "dbytes",
+      "rate",
+      "sttl",
+      "dttl",
+      "sload",
+      "dload",
+      "sloss",
+      "dloss",
+      "dinpkt",
+      "sjit",
+      "tcprtt",
+      "synack",
+      "ackdat",
+      "smean",
+      "dmean",
+      "response_body_len",
+      "ct_srv_src",
+      "ct_state_ttl",
+      "ct_src_dport_ltm",
+      "ct_dst_sport_ltm",
+      "ct_src_ltm",
+      "proto_encoded",
+      "service_encoded",
+      "state_encoded",
+      "swin_encoded",
+      "dwin_encoded"
+    ]
+  }
+}
