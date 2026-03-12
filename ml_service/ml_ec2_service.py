@@ -1,364 +1,197 @@
 """
-ML WEB SERVICE - Attack Prediction API
-======================================
+ML WEB SERVICE — Random Forest Attack Prediction API
+=====================================================
+Loads the trained Random Forest model and provides HTTP endpoints
+for real-time network attack prediction.
 
-This service provides HTTP endpoints for attack prediction.
-It loads trained models and processes network metrics from the local network agent.
+Endpoints:
+    POST /predict  — Predict if network traffic is an attack
+    GET  /health   — Health check
 """
 
 from flask import Flask, request, jsonify  # type: ignore
 import numpy as np  # type: ignore
-import torch   # type: ignore
+import pandas as pd  # type: ignore
+import joblib  # type: ignore
 import logging
-import json
-from datetime import datetime 
-
-# Import incremental training functionality
-from incremental_train import IncrementalTrainer  # type: ignore
+import os
+from datetime import datetime
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Global model instances
-ae = None
-orc = None
-rf = None
-preprocessor = None
+# =============================================================================
+# Global model instances — loaded at startup
+# =============================================================================
+rf_model = None
+scaler = None
+label_encoder = None
+feature_columns = None
 
-# Global incremental trainer instance
-incremental_trainer = None
+ARTIFACTS_DIR = os.path.join(os.path.dirname(__file__), 'rf_artifacts')
 
-def load_training_metadata():
-    """Load training metadata to get correct dimensions."""
+# The 38 numeric KDD features (before one-hot encoding)
+KDD_NUMERIC_FEATURES = [
+    'duration', 'src_bytes', 'dst_bytes', 'land', 'wrong_fragment', 'urgent',
+    'hot', 'num_failed_logins', 'logged_in', 'num_compromised', 'root_shell',
+    'su_attempted', 'num_root', 'num_file_creations', 'num_shells',
+    'num_access_files', 'num_outbound_cmds', 'is_host_login', 'is_guest_login',
+    'count', 'srv_count', 'serror_rate', 'srv_serror_rate', 'rerror_rate',
+    'srv_rerror_rate', 'same_srv_rate', 'diff_srv_rate', 'srv_diff_host_rate',
+    'dst_host_count', 'dst_host_srv_count', 'dst_host_same_srv_rate',
+    'dst_host_diff_srv_rate', 'dst_host_same_src_port_rate',
+    'dst_host_srv_diff_host_rate', 'dst_host_serror_rate',
+    'dst_host_srv_serror_rate', 'dst_host_rerror_rate',
+    'dst_host_srv_rerror_rate'
+]
+
+# The 3 categorical KDD features
+KDD_CATEGORICAL_FEATURES = ['protocol_type', 'service', 'flag']
+
+
+def load_models():
+    """Load all trained model artifacts at startup."""
+    global rf_model, scaler, label_encoder, feature_columns
+
     try:
-        with open("artifacts/training_metadata.json", "r") as f:
-            metadata = json.load(f)
-        
-        processed_features = metadata["training_stats"]["processed_features"]
-        selected_features = metadata["training_stats"]["selected_features"]
-        
-        logger.info(f"Training metadata loaded: {processed_features} processed features, {selected_features} selected features")
-        return processed_features, selected_features
-        
+        logger.info("🔄 Loading Random Forest model artifacts...")
+
+        rf_model = joblib.load(os.path.join(ARTIFACTS_DIR, 'rf_model.pkl'))
+        logger.info("   ✅ Random Forest model loaded")
+
+        scaler = joblib.load(os.path.join(ARTIFACTS_DIR, 'scaler.pkl'))
+        logger.info("   ✅ StandardScaler loaded")
+
+        label_encoder = joblib.load(os.path.join(ARTIFACTS_DIR, 'label_encoder.pkl'))
+        logger.info(f"   ✅ LabelEncoder loaded (classes: {list(label_encoder.classes_)})")
+
+        feature_columns = joblib.load(os.path.join(ARTIFACTS_DIR, 'feature_columns.pkl'))
+        logger.info(f"   ✅ Feature columns loaded ({len(feature_columns)} features)")
+
+        logger.info("🎉 All models loaded successfully!")
+        return True
     except Exception as e:
-        logger.warning(f"Could not load training metadata: {e}")
-        logger.info("Using default dimensions: 73 processed, 40 selected")
-        return 73, 40
+        logger.error(f"❌ Failed to load models: {e}")
+        return False
 
 
-def initialize_incremental_trainer():
-    """Initialize the global incremental trainer."""
-    global incremental_trainer
-    try:
-        incremental_trainer = IncrementalTrainer("artifacts")
-        if incremental_trainer.initialize_or_load_models():
-            logger.info("✅ Incremental trainer initialized successfully")
-        else:
-            logger.warning("⚠️ Incremental trainer initialization failed")
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize incremental trainer: {e}")
-
-def map_scapy_to_unsw(raw_data):
-    """Map Scapy-based features from agent to UNSW_NB15 features expected by the model."""
-    duration = float(raw_data.get('duration', 0.001))
-    if duration <= 0: duration = 0.001
+def map_raw_to_kdd(raw_data: dict) -> pd.DataFrame:
+    """
+    Map raw network flow data from the agent to a KDD-format DataFrame.
     
-    forward_bytes = float(raw_data.get('forward_bytes', 0))
-    reverse_bytes = float(raw_data.get('reverse_bytes', 0))
-    forward_packets = float(raw_data.get('forward_packets', 1))
-    reverse_packets = float(raw_data.get('reverse_packets', 1))
+    The agent sends raw packet features. This function:
+    1. Extracts numeric KDD features (defaults to 0.0 if missing)
+    2. Extracts categorical features (protocol_type, service, flag)
+    3. One-hot encodes the categorical features
+    4. Aligns to the exact training column order
+    """
+    # Build a single-row dict of numeric features
+    row = {}
+    for feat in KDD_NUMERIC_FEATURES:
+        row[feat] = float(raw_data.get(feat, 0.0))
 
-    mapped = {
-        'dur': duration,
-        'spkts': forward_packets,
-        'dpkts': reverse_packets,
-        'sbytes': forward_bytes,
-        'dbytes': reverse_bytes,
-        'rate': float(raw_data.get('packets_per_second', 0)),
-        'sttl': float(raw_data.get('forward_ttl', 0)),
-        'dttl': float(raw_data.get('reverse_ttl', 0)),
-        'sload': (forward_bytes * 8) / duration,
-        'dload': (reverse_bytes * 8) / duration,
-        'sloss': 0,
-        'dloss': 0,
-        'sinpkt': (duration / max(forward_packets, 1)) * 1000,
-        'dinpkt': (duration / max(reverse_packets, 1)) * 1000,
-        'sjit': 0,
-        'djit': 0,
-        'swin': float(raw_data.get('tcp_window_size_forward', 0)),
-        'dwin': float(raw_data.get('tcp_window_size_reverse', 0)),
-        'stcpb': 0,
-        'dtcpb': 0,
-        'tcprtt': 0,
-        'synack': 0,
-        'ackdat': 0,
-        'smean': float(raw_data.get('forward_avg_packet_size', 0)),
-        'dmean': float(raw_data.get('reverse_avg_packet_size', 0)),
-        'trans_depth': 0,
-        'response_body_len': 0,
-        'ct_srv_src': 1,
-        'ct_state_ttl': 0,
-        'ct_dst_ltm': 1,
-        'ct_src_dport_ltm': 1,
-        'ct_dst_sport_ltm': 1,
-        'ct_dst_src_ltm': 1,
-        'is_ftp_login': 0,
-        'ct_ftp_cmd': 0,
-        'ct_flw_http_mthd': 0,
-        'ct_src_ltm': 1,
-        'ct_srv_dst': 1,
-        'is_sm_ips_ports': 0,
-        'proto': _proto_to_str(raw_data.get('protocol', 'tcp')),
-        'service': '-',
-        'state': str(raw_data.get('connection_state', 'CON'))
-    }
-    return mapped
+    # Build categorical features
+    protocol = raw_data.get('protocol_type', 'tcp').lower()
+    service = raw_data.get('service', 'http').lower()
+    flag = raw_data.get('flag', 'SF').upper()
 
-def _proto_to_str(proto):
-    """Convert protocol to string format expected by the model."""
-    proto_map = {6: 'tcp', 17: 'udp', 1: 'icmp', 2: 'igmp'}
-    if isinstance(proto, (int, float)):
-        return proto_map.get(int(proto), 'tcp')
-    return str(proto).lower()
+    row['protocol_type'] = protocol
+    row['service'] = service
+    row['flag'] = flag
+
+    # Create DataFrame and one-hot encode
+    df = pd.DataFrame([row])
+    df = pd.get_dummies(df)
+
+    # Align to exact training columns — fill missing with 0
+    assert feature_columns is not None
+    for col in feature_columns:
+        if col not in df.columns:
+            df[col] = 0
+
+    # Ensure exact column order
+    df = df[feature_columns]
+
+    return df
+
 
 @app.route('/predict', methods=['POST'])
 def predict_attack():
-    """Predict if network traffic is an attack."""
-    global incremental_trainer
-    
+    """Predict if network traffic is an attack using Random Forest."""
     try:
-        # Get network metrics from the network agent
         raw_data = request.json
-        
-        logger.info(f"Received prediction request from IP: {raw_data.get('srcip', 'unknown')}")
-        
-        # Use incremental trainer models for consistency
-        if incremental_trainer is None:
-            initialize_incremental_trainer()
-            
-        if incremental_trainer is None or not incremental_trainer.is_initialized:
-            return jsonify({'error': 'Models not initialized'}), 500
-        
-        # Map Scapy features to UNSW features
-        mapped_data = map_scapy_to_unsw(raw_data)
-        
-        assert incremental_trainer is not None
-        
-        # Use incremental trainer's models (consistent with streaming training)
-        preprocessor = incremental_trainer.preprocessor
-        ae = incremental_trainer.ae
-        orc = incremental_trainer.orc_sel
-        rf = incremental_trainer.rf
-        
-        # Check if feature selection is enabled from training metadata
-        metadata_path = "artifacts/training_metadata.json"
-        
-        apply_feature_selection = False  # Default to disabled
-        try:
-            with open(metadata_path, "r") as f:
-                metadata = json.load(f)
-            apply_feature_selection = metadata.get('apply_feature_selection', False)
-        except Exception as e:
-            logger.warning(f"Could not load feature selection flag from metadata: {e}")
-            logger.info("Using default: feature selection DISABLED")
-        
-        # Safety: if AE or ORC not available, force feature selection off
-        if apply_feature_selection and (ae is None or orc is None):
-            logger.warning("AutoEncoder/ORC not available — using all features")
-            apply_feature_selection = False
-        
-        # Preprocess mapped data
-        x_processed = preprocessor.transform_single(mapped_data)
-        
-        if apply_feature_selection:
-            # FEATURE SELECTION ENABLED: Use AutoEncoder + ORC pipeline
-            x_tensor = torch.from_numpy(x_processed.astype(np.float32))
-            
-            # AutoEncoder reconstruction
-            recon = ae.forward_no_grad(x_tensor)
-            err = np.abs(x_processed - recon.numpy())
-            
-            # Update ORC feature selector
-            orc.update(err)
-            mask_idx = orc.get_mask_indices()
-            
-            # Create reduced feature set
-            feature_names = orc.feature_names
-            x_reduced = {feature_names[i]: float(x_processed[i]) for i in mask_idx}
-            features_used = [feature_names[i] for i in mask_idx]
-        else:
-            # FEATURE SELECTION DISABLED: Use all features directly
-            feature_names = preprocessor.get_feature_names()
-            x_reduced = {feature_names[i]: float(x_processed[i]) for i in range(len(x_processed))}
-            features_used = feature_names
-            
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f"Feature selection DISABLED - using all {len(x_processed)} features")
-        
-        # Make prediction
-        proba = rf.predict_proba(x_reduced)
-        attack_prob = proba.get(1, 0.0)
-        
-        # --- DEMO HEURISTIC OVERRIDE ---
-        # The UNSW-NB15 model may not naturally classify generic localhost traffic as attacks.
-        # For demo purposes, we automatically flag anomalous patterns (like HTTP floods or scans).
-        rate = float(raw_data.get('packets_per_second', 0))
-        fwd_pkts = float(raw_data.get('forward_packets', 0))
-        dur = float(raw_data.get('duration', 0.1))
-        
-        # High request rate (Flood/Scan) or lots of packets in short time
-        if rate > 50 or (fwd_pkts > 30 and dur < 2.0):
-            import random
-            attack_prob = max(float(attack_prob), random.uniform(0.85, 0.99))
-            
-        prediction = 1 if attack_prob >= rf.cfg.attack_threshold else 0
-        
-        result = {
-            'timestamp': datetime.utcnow().isoformat(),
-            'prediction': prediction,
-            'attack_probability': float(attack_prob),
-            'source_ip': raw_data.get('srcip', 'unknown'),
-            'features_used': features_used,
-            'feature_selection_enabled': apply_feature_selection
-        }
-        
-        logger.info(f"Prediction: {prediction} (prob: {attack_prob:.3f}) for IP: {raw_data.get('srcip')}")
-        
-        return jsonify(result)
-        
+        src_ip = raw_data.get('srcip', 'unknown')
+
+        logger.info(f"📥 Prediction request from IP: {src_ip}")
+
+        if rf_model is None or scaler is None or feature_columns is None:
+            return jsonify({'error': 'Models not loaded'}), 500
+
+        # Map raw features to KDD format
+        df = map_raw_to_kdd(raw_data)
+
+        # Scale features (same StandardScaler used in training)
+        X_scaled = scaler.transform(df.values)
+
+        # Predict
+        prediction = int(rf_model.predict(X_scaled)[0])
+        probabilities = rf_model.predict_proba(X_scaled)[0]
+
+        # In the LabelEncoder: attack=0, normal=1
+        # So probability of attack = probabilities[0]
+        attack_prob = float(probabilities[0])
+
+        # Map prediction to label
+        assert label_encoder is not None
+        predicted_label = label_encoder.inverse_transform([prediction])[0]
+        is_attack = 1 if predicted_label == 'attack' else 0
+
+        logger.info(f"{'🚨' if is_attack else '✅'} Prediction: {'ATTACK' if is_attack else 'NORMAL'} "
+                     f"(prob: {attack_prob:.3f}) for IP: {src_ip}")
+
+        return jsonify({
+            'prediction': is_attack,
+            'attack_probability': round(attack_prob, 4),
+            'confidence': round(max(probabilities), 4),
+            'predicted_label': predicted_label,
+            'model': 'RandomForest',
+            'timestamp': datetime.utcnow().isoformat()
+        })
+
     except Exception as e:
-        logger.error(f"❌ Error in prediction: {str(e)}")
+        logger.error(f"❌ Prediction error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-@app.route('/train', methods=['POST'])
-def train_streaming():
-    """Train models incrementally with streaming data."""
-    global incremental_trainer
-    
-    try:
-
-        training_data = request.json
-        
-        if not training_data or 'flows' not in training_data:
-            return jsonify({'error': 'Invalid request format. Expected "flows" field.'}), 400
-        
-        flows = training_data['flows']
-        batch_size = len(flows)
-        
-        logger.info(f"Received streaming training batch: {batch_size} samples")
-        
-        if incremental_trainer is None:
-            initialize_incremental_trainer()
-        
-        if incremental_trainer is None:
-            return jsonify({'error': 'Failed to initialize incremental trainer'}), 500
-        
-        result = incremental_trainer.process_streaming_batch(flows)
-        
-        if not result.get('success', False):
-            error_msg = result.get('error', 'Unknown training error')
-            logger.error(f"❌ Streaming training failed: {error_msg}")
-            return jsonify({'error': error_msg}), 500
-        
-        logger.info("✅ Training completed - using incremental_trainer models for predictions")
-        
-        # Prepare response
-        response = {
-            'success': True,
-            'timestamp': datetime.utcnow().isoformat(),
-            'batch_size': batch_size,
-            'processed_samples': result.get('processed_samples', 0),
-            'normal_samples': result.get('normal_samples', 0),
-            'attack_samples': result.get('attack_samples', 0),
-            'total_processed': result.get('total_processed', 0),
-            'batches_processed': result.get('batches_processed', 0),
-            'selected_features': result.get('selected_features', 0),
-            'preprocessing_updates': result.get('preprocessing_updates', {}),
-            'cumulative_class_distribution': {
-                'total_normal_samples': result.get('total_normal_samples', 0),
-                'total_attack_samples': result.get('total_attack_samples', 0),
-                'class_balance_ratio': result.get('class_balance_ratio', 0.0)
-            }
-        }
-        
-        logger.info(f"✅ Streaming training completed: {result.get('processed_samples', 0)} samples processed")
-        logger.info(f"├─ Batch: Normal: {result.get('normal_samples', 0)}, Attack: {result.get('attack_samples', 0)}")
-        logger.info(f"├─ Cumulative: Normal: {result.get('total_normal_samples', 0):,}, Attack: {result.get('total_attack_samples', 0):,}")
-        logger.info(f"├─ Class balance ratio: {result.get('class_balance_ratio', 0.0):.2f}:1")
-        logger.info(f"├─ Total processed: {result.get('total_processed', 0):,}")
-        logger.info(f"└─ Selected features: {result.get('selected_features', 0)}")
-        
-        return jsonify(response)
-        
-    except Exception as e:
-        logger.error(f"❌ Error in streaming training: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/training-status', methods=['GET'])
-def get_training_status():
-    """Get current incremental training status."""
-    global incremental_trainer
-    
-    try:
-        if incremental_trainer is None:
-            return jsonify({
-                'initialized': False,
-                'message': 'Incremental trainer not initialized'
-            })
-        
-        assert incremental_trainer is not None
-        
-        from typing import Dict, Any
-        status: Dict[str, Any] = dict(incremental_trainer.get_training_status()) # type: ignore
-        status['timestamp'] = datetime.utcnow().isoformat()
-        
-        return jsonify(status)
-        
-    except Exception as e:
-        logger.error(f"❌ Error getting training status: {str(e)}")
-        return jsonify({'error': str(e)}), 500
 
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint."""
-    # Check if incremental trainer models are ready
-    incremental_models_ready = (
-        incremental_trainer is not None and 
-        incremental_trainer.is_initialized and
-        all([
-            incremental_trainer.preprocessor is not None,
-            incremental_trainer.ae is not None,
-            incremental_trainer.orc_sel is not None,
-            incremental_trainer.rf is not None
-        ])
-    )
-    
-    return jsonify({
-        'status': 'healthy',
-        'timestamp': datetime.utcnow().isoformat(),
-        'models_loaded': all([ae, orc, rf, preprocessor]),  # Legacy global models
-        'incremental_trainer_ready': incremental_trainer is not None and incremental_trainer.is_initialized,
-        'incremental_models_ready': incremental_models_ready,  # The models actually used for prediction/training
-        'primary_model_system': 'incremental_trainer'  # Indicate which system is primary
-    })
+    models_loaded = all([rf_model is not None, scaler is not None,
+                         label_encoder is not None, feature_columns is not None])
 
-@app.route('/', methods=['GET'])
-def root():
-    """Root endpoint."""
     return jsonify({
-        'service': 'ML Attack Predictor',
-        'status': 'running',
-        'version': '1.0',
-        'endpoints': ['/health', '/predict', '/train', '/training-status']
+        'status': 'healthy' if models_loaded else 'unhealthy',
+        'models_loaded': models_loaded,
+        'model_type': 'RandomForest',
+        'n_features': len(feature_columns) if feature_columns else 0,
+        'timestamp': datetime.utcnow().isoformat()
     })
 
 
-try:
-    initialize_incremental_trainer()
-except Exception as e:
-    logger.error(f"❌ Failed to initialize service: {e}")
-    logger.info("Service will still start but may not work properly until models are available")
-
+# =============================================================================
+# Startup
+# =============================================================================
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080, debug=False)
+    print("=" * 60)
+    print("  🧠 ML BACKEND — Random Forest IDS")
+    print("=" * 60)
+
+    if load_models():
+        print("\n🚀 Starting ML backend on http://localhost:8080")
+        app.run(host='0.0.0.0', port=8080, debug=False)
+    else:
+        print("\n❌ Failed to load models. Run train_rf_model.py first!")
+        print("   cd ml_service && python train_rf_model.py")

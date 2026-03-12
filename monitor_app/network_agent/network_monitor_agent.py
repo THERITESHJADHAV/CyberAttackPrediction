@@ -638,13 +638,9 @@ class NetworkMonitor:
         try:
             logger.info(f"🚀 Sending flow to ML model for prediction: {self.server_ip} <-> {remote_ip}")
             
-            # Create a clean feature set with only scapy features
-            clean_features = {}
-            for feature in SCAPY_FEATURES:
-                if feature in flow_features:
-                    clean_features[feature] = flow_features[feature]
-                else:
-                    clean_features[feature] = 0
+            # Map Scapy features to KDD features for the Random Forest model
+            kdd_features = self._map_to_kdd_features(flow_features)
+            kdd_features['srcip'] = remote_ip  # For logging on the backend side
 
             # Log the payload
             logger.info(f"📤 Sending prediction request for flow_{self.flow_count}")
@@ -652,7 +648,7 @@ class NetworkMonitor:
             # Send to ML endpoint
             response = requests.post(
                 self.predict_endpoint,
-                json=clean_features,
+                json=kdd_features,
                 timeout=10.0
             )
             
@@ -664,13 +660,125 @@ class NetworkMonitor:
                 logger.info(f"✅ ML Prediction: {prediction_result} (prob: {attack_prob:.3f})")
                 
                 # Forward prediction + flow metadata to dashboard API
-                self._forward_to_dashboard(clean_features, prediction, remote_ip)
+                self._forward_to_dashboard(flow_features, prediction, remote_ip)
                 
             else:
-                logger.warning(f"❌ ML model returned status {response.status_code}")
+                logger.warning(f"❌ ML model returned status {response.status_code}: {response.text[:200]}")
                 
         except Exception as e:
             logger.error(f"Error calling ML model for prediction: {str(e)}")
+
+    def _map_to_kdd_features(self, flow_features: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Map raw Scapy flow features to KDD dataset feature names.
+        
+        The Random Forest model was trained on KDD features. This maps
+        what we can extract from packets to the KDD format. Features that
+        cannot be extracted from raw packets default to 0.
+        """
+        duration = float(flow_features.get('duration', 0))
+        total_packets = int(flow_features.get('total_packets', 0))
+        forward_bytes = int(flow_features.get('forward_bytes', 0))
+        reverse_bytes = int(flow_features.get('reverse_bytes', 0))
+        protocol_num = int(flow_features.get('protocol', 6))
+        dst_port = int(flow_features.get('dst_port', 0))
+        syn_count = int(flow_features.get('syn_count', 0))
+        fin_count = int(flow_features.get('fin_count', 0))
+        rst_count = int(flow_features.get('rst_count', 0))
+        ack_count = int(flow_features.get('ack_count', 0))
+        is_bidir = int(flow_features.get('is_bidirectional', 0))
+        conn_state = flow_features.get('connection_state', 'CON')
+        pps = float(flow_features.get('packets_per_second', 0))
+
+        # Protocol type mapping
+        proto_map = {6: 'tcp', 17: 'udp', 1: 'icmp'}
+        protocol_type = proto_map.get(protocol_num, 'tcp')
+
+        # Service mapping based on destination port  
+        port_service_map = {
+            80: 'http', 443: 'http_443', 8080: 'http_8001', 8001: 'http_8001',
+            21: 'ftp', 20: 'ftp_data', 22: 'ssh', 23: 'telnet', 25: 'smtp',
+            53: 'domain', 110: 'pop_3', 143: 'imap4', 993: 'imap4',
+            3306: 'sql_net', 5432: 'sql_net', 6667: 'IRC',
+            5000: 'http',  # Our target website
+        }
+        service = port_service_map.get(dst_port, 'other')
+
+        # Flag mapping based on TCP connection state
+        flag_map = {
+            'CON': 'SF',       # Normal connection
+            'SYN': 'S0',       # SYN sent, no reply
+            'SYN_ACK': 'S1',   # SYN-ACK
+            'FIN': 'SF',       # Normal termination
+            'RST': 'REJ',      # Connection rejected
+            'ESTABLISHED': 'SF',
+        }
+        flag = flag_map.get(str(conn_state), 'SF')
+        
+        # If RST was seen, that's a rejection
+        if rst_count > 0 and syn_count > 0 and ack_count == 0:
+            flag = 'REJ'
+        elif rst_count > 0:
+            flag = 'RSTO'
+        elif syn_count > 0 and not is_bidir:
+            flag = 'S0'
+
+        # Calculate rates
+        serror_rate = 1.0 if syn_count > 0 and not is_bidir else 0.0
+        rerror_rate = 1.0 if rst_count > 0 else 0.0
+
+        kdd = {
+            # === Features we CAN extract from packets ===
+            'duration': duration,
+            'protocol_type': protocol_type,
+            'service': service,
+            'flag': flag,
+            'src_bytes': float(forward_bytes),
+            'dst_bytes': float(reverse_bytes),
+            'land': 1.0 if flow_features.get('src_port', 0) == flow_features.get('dst_port', 0) else 0.0,
+            'wrong_fragment': 0.0,
+            'urgent': 0.0,
+            
+            # === Content features (cannot extract from raw packets — default to 0) ===
+            'hot': 0.0,
+            'num_failed_logins': 0.0,
+            'logged_in': 1.0 if is_bidir and fin_count > 0 else 0.0,
+            'num_compromised': 0.0,
+            'root_shell': 0.0,
+            'su_attempted': 0.0,
+            'num_root': 0.0,
+            'num_file_creations': 0.0,
+            'num_shells': 0.0,
+            'num_access_files': 0.0,
+            'num_outbound_cmds': 0.0,
+            'is_host_login': 0.0,
+            'is_guest_login': 0.0,
+            
+            # === Traffic features (computed from flow statistics) ===
+            'count': float(total_packets),
+            'srv_count': float(total_packets),  # Same service count
+            'serror_rate': serror_rate,
+            'srv_serror_rate': serror_rate,
+            'rerror_rate': rerror_rate,
+            'srv_rerror_rate': rerror_rate,
+            'same_srv_rate': 1.0,  # All connections to the same service
+            'diff_srv_rate': 0.0,
+            'srv_diff_host_rate': 0.0,
+            
+            # === Host-based features (approximated from flow) ===
+            'dst_host_count': min(float(total_packets), 255.0),
+            'dst_host_srv_count': min(float(total_packets), 255.0),
+            'dst_host_same_srv_rate': 1.0,
+            'dst_host_diff_srv_rate': 0.0,
+            'dst_host_same_src_port_rate': 1.0 if total_packets > 5 else 0.5,
+            'dst_host_srv_diff_host_rate': 0.0,
+            'dst_host_serror_rate': serror_rate,
+            'dst_host_srv_serror_rate': serror_rate,
+            'dst_host_rerror_rate': rerror_rate,
+            'dst_host_srv_rerror_rate': rerror_rate,
+        }
+
+        return kdd
 
     def _forward_to_dashboard(self, flow_features: Dict[str, Any], ml_prediction: Dict[str, Any], remote_ip: str):
         """Forward completed prediction to the Next.js dashboard API."""
@@ -689,8 +797,7 @@ class NetworkMonitor:
                 "connection_state": str(flow_features.get('connection_state', 'CON')),
                 "prediction": ml_prediction.get('prediction', 0),
                 "attack_probability": ml_prediction.get('attack_probability', 0),
-                "features_used": ml_prediction.get('features_used', []),
-                "feature_selection_enabled": ml_prediction.get('feature_selection_enabled', False),
+                "model": ml_prediction.get('model', 'RandomForest'),
             }
 
             resp = requests.post(
