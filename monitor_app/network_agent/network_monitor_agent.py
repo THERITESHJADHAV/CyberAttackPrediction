@@ -24,7 +24,7 @@ Flow Analysis:
 """
 
 import time
-import requests
+import requests  # type: ignore
 import json
 from datetime import datetime
 from typing import Dict, Any, List
@@ -33,13 +33,13 @@ import signal
 import sys
 import os
 import socket
-import psutil
+import psutil  # type: ignore
 import threading
 import tempfile
 import queue
 
 # Scapy imports
-from scapy.all import sniff, IP, TCP, UDP
+from scapy.all import sniff, IP, TCP, UDP  # type: ignore
 
 # Configure logging
 logging.basicConfig(
@@ -438,8 +438,8 @@ class NetworkMonitor:
             
             for flow_key, flow_data in list(self.active_flows.items()):
                 should_complete = False
-                flow_duration = current_time - flow_data['start_time']
-                idle_time = current_time - flow_data['last_activity']
+                flow_duration = float(current_time) - float(flow_data['start_time'])
+                idle_time = float(current_time) - float(flow_data['last_activity'])
                 
                 # Complete flows based on standard criteria
                 if (flow_duration >= self.flow_timeout or  # Standard duration reached
@@ -456,7 +456,7 @@ class NetworkMonitor:
                 if total_packets > 0:  # Only process flows with packets
                     logger.info(f"📊 Completing flow: {total_packets} packets (fwd: {len(flow_data['forward_packets'])}, rev: {len(flow_data['reverse_packets'])})")
                     self._process_completed_flow(flow_data)
-                del self.active_flows[flow_key]
+                self.active_flows.pop(flow_key, None)
             
             # Log active flows
             if flows_to_complete:

@@ -16,6 +16,7 @@ import joblib  # type: ignore
 import logging
 import os
 from datetime import datetime
+from typing import Any
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -24,10 +25,10 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # Global model instances — loaded at startup
 # =============================================================================
-rf_model = None
-scaler = None
-label_encoder = None
-feature_columns = None
+rf_model: Any = None
+scaler: Any = None
+label_encoder: Any = None
+feature_columns: Any = None
 
 ARTIFACTS_DIR = os.path.join(os.path.dirname(__file__), 'rf_artifacts')
 
@@ -132,15 +133,20 @@ def predict_attack():
         df = map_raw_to_kdd(raw_data)
 
         # Scale features (same StandardScaler used in training)
-        X_scaled = scaler.transform(df.values)
+        X_scaled = scaler.transform(df.values)  # type: ignore
 
         # Predict
-        prediction = int(rf_model.predict(X_scaled)[0])
-        probabilities = rf_model.predict_proba(X_scaled)[0]
+        prediction = int(rf_model.predict(X_scaled)[0])  # type: ignore
+        probabilities = rf_model.predict_proba(X_scaled)[0]  # type: ignore
 
         # In the LabelEncoder: attack=0, normal=1
         # So probability of attack = probabilities[0]
-        attack_prob = float(probabilities[0])
+        attack_prob: float = float(probabilities[0])
+        max_prob: float = float(max(probabilities))
+        
+        # Round explicitly for typing
+        rounded_attack_prob: float = float(f"{attack_prob:.4f}")
+        rounded_max_prob: float = float(f"{max_prob:.4f}")
 
         # Map prediction to label
         assert label_encoder is not None
@@ -152,8 +158,8 @@ def predict_attack():
 
         return jsonify({
             'prediction': is_attack,
-            'attack_probability': round(attack_prob, 4),
-            'confidence': round(max(probabilities), 4),
+            'attack_probability': rounded_attack_prob,
+            'confidence': rounded_max_prob,
             'predicted_label': predicted_label,
             'model': 'RandomForest',
             'timestamp': datetime.utcnow().isoformat()
