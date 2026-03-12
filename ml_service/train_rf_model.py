@@ -11,12 +11,12 @@ Usage:
 
 import os
 import sys
-import joblib
-import numpy as np
-import pandas as pd
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report
+import joblib  # type: ignore
+import numpy as np  # type: ignore
+import pandas as pd  # type: ignore
+from sklearn.preprocessing import StandardScaler, LabelEncoder  # type: ignore
+from sklearn.ensemble import RandomForestClassifier  # type: ignore
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report  # type: ignore
 
 # =============================================================================
 # Configuration
