@@ -85,20 +85,32 @@ EXCLUDED_PORTS = []
 class NetworkMonitor:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.interface = config.get('interface', 'eth0')
+        self.interface = config.get('interface', None)  # None = auto-detect
         self.mode = config.get('mode', 'predict')  # 'train' or 'predict'
         self.batch_size = config.get('batch_size', 30)  # For training mode
         self.label = config.get('label', 0)  # Label for training mode (0=benign, 1=attack)
         
+        # Target website port to monitor
+        self.target_port = config.get('target_port', 5000)
+        
         # Endpoints
-        base_url = config.get('base_url', 'http://15.160.68.117:8080')
+        base_url = config.get('base_url', 'http://localhost:8080')
         self.predict_endpoint = f"{base_url}/predict"
         self.train_endpoint = f"{base_url}/train"
+        
+        # Dashboard API endpoint (Next.js)
+        self.dashboard_url = config.get('dashboard_url', 'http://localhost:3000')
+        self.dashboard_predictions_endpoint = f"{self.dashboard_url}/api/predictions"
+        
+        # Ports to exclude (ML backend, dashboard, agent traffic)
+        ml_port = int(base_url.split(':')[-1]) if ':' in base_url.rsplit('/', 1)[-1] else 8080
+        dash_port = int(self.dashboard_url.split(':')[-1]) if ':' in self.dashboard_url.rsplit('/', 1)[-1] else 3000
+        self.excluded_ports = {ml_port, dash_port}  # Don't capture own infrastructure traffic
         
         # Flow processing settings
         self.flow_timeout = config.get('flow_timeout', 5.0) 
         self.capture_window = config.get('capture_window', 5)  
-        self.max_packets_per_flow = config.get('max_packets_per_flow', 50)  # Standard packet count
+        self.max_packets_per_flow = config.get('max_packets_per_flow', 50)
         
         self.packet_queue = queue.Queue(maxsize=10000)
         
@@ -115,7 +127,7 @@ class NetworkMonitor:
         
         # Training batch management
         self.training_batch = []
-        self.training_queue = queue.Queue()  # Sequential training queue
+        self.training_queue = queue.Queue()
         self.training_in_progress = False
         
         # Threading for packet capture and processing
@@ -124,12 +136,17 @@ class NetworkMonitor:
         # Flow tracking
         self.active_flows = {}
         
+        # Auto-detect the best interface for capturing
+        if self.interface is None:
+            self.interface = self._find_capture_interface()
+        
         logger.info(f"Initialized Network Monitor in {self.mode.upper()} mode")
         logger.info(f"  - Interface: {self.interface}")
         logger.info(f"  - Server IP: {self.server_ip}")
+        logger.info(f"  - Target Website Port: {self.target_port}")
         logger.info(f"  - Predict Endpoint: {self.predict_endpoint}")
-        logger.info(f"  - Train Endpoint: {self.train_endpoint}")
-        logger.info(f"  - ML Endpoint IP: {self.ml_endpoint_ip} (excluded from monitoring)")
+        logger.info(f"  - Dashboard Endpoint: {self.dashboard_predictions_endpoint}")
+        logger.info(f"  - Excluded Ports: {self.excluded_ports}")
         logger.info(f"  - Flow Timeout: {self.flow_timeout}s")
         logger.info(f"  - Batch Size (train mode): {self.batch_size}")
         if self.mode == 'train':
@@ -142,35 +159,45 @@ class NetworkMonitor:
         try:
             from urllib.parse import urlparse
             parsed = urlparse(base_url)
-            return parsed.hostname or '15.160.68.117'
+            return parsed.hostname or '127.0.0.1'
         except:
-            return '15.160.68.117'
+            return '127.0.0.1'
 
     def _get_server_ip(self) -> str:
         """Detect the server's primary IP address."""
-        try:
-            # Method 1: Connect to a remote address to determine local IP
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.connect(("8.8.8.8", 80))
-                local_ip = s.getsockname()[0]
-                return local_ip
-        except:
-            pass
-            
-        try:
-            # Method 2: Use psutil to get interface addresses
-            for interface_name in psutil.net_if_addrs():
-                if interface_name == self.interface:
-                    addresses = psutil.net_if_addrs()[interface_name]
-                    for addr in addresses:
-                        if addr.family == socket.AF_INET and not addr.address.startswith('127.'):
-                            return addr.address
-        except:
-            pass
-            
-        # Fallback
-        logger.warning("Could not detect server IP, using fallback 127.0.0.1")
+        # For local monitoring, we use 127.0.0.1 (localhost)
         return "127.0.0.1"
+
+    def _find_capture_interface(self) -> str:
+        """Find the best network interface for packet capture on Windows."""
+        try:
+            from scapy.arch.windows import get_windows_if_list
+            interfaces = get_windows_if_list()
+            
+            # First, look for Npcap Loopback Adapter (best for localhost traffic)
+            for iface in interfaces:
+                name = iface.get('name', '').lower()
+                desc = iface.get('description', '').lower()
+                if 'loopback' in name or 'loopback' in desc or 'npcap' in desc and 'loopback' in desc:
+                    logger.info(f"Found loopback adapter: {iface.get('name')}")
+                    return iface['name']
+            
+            # Fall back to any active interface
+            for iface in interfaces:
+                ips = iface.get('ips', [])
+                if any(not ip.startswith('127.') and not ip.startswith('169.') for ip in ips if ':' not in ip):
+                    logger.info(f"Using active interface: {iface.get('name')}")
+                    return iface['name']
+                    
+        except Exception as e:
+            logger.warning(f"Could not auto-detect interface: {e}")
+        
+        # Final fallback
+        try:
+            from scapy.all import conf
+            return conf.iface
+        except:
+            return 'eth0'
 
     def start_monitoring(self):
         """Start the network monitoring process using Scapy."""
@@ -201,26 +228,24 @@ class NetworkMonitor:
             self._cleanup()
 
     def _capture_packets(self):
-        """Capture packets using scapy."""
-        logger.info("🎯 Starting packet capture...")
+        """Capture packets using scapy — focused on target website port."""
+        logger.info(f"🎯 Starting packet capture on interface: {self.interface}")
+        logger.info(f"🎯 Monitoring traffic on port {self.target_port}")
+        
+        # BPF filter to capture only target port traffic
+        bpf_filter = f"tcp port {self.target_port}"
         
         def packet_handler(packet):
             if not self.running:
                 return False
             
             try:
-                # Extract basic packet info
-                src_ip = packet[IP].src if packet.haslayer(IP) else None
-                dst_ip = packet[IP].dst if packet.haslayer(IP) else None
-                
-                if not src_ip or not dst_ip:
+                if not packet.haslayer(IP):
                     return self.running
                 
-                # SKIP ML ENDPOINT TRAFFIC
-                if (src_ip == self.ml_endpoint_ip or dst_ip == self.ml_endpoint_ip):
-                    return self.running
+                src_ip = packet[IP].src
+                dst_ip = packet[IP].dst
                 
-                # SKIP EXCLUDED PORTS
                 src_port = None
                 dst_port = None
                 
@@ -231,21 +256,21 @@ class NetworkMonitor:
                     src_port = packet[UDP].sport
                     dst_port = packet[UDP].dport
                 
-                # Filter out excluded ports
-                if src_port in EXCLUDED_PORTS or dst_port in EXCLUDED_PORTS:
+                # Only capture traffic involving the target port
+                if src_port != self.target_port and dst_port != self.target_port:
                     return self.running
                 
-                # Only process packets involving our server
-                if src_ip == self.server_ip or dst_ip == self.server_ip:
-                    if not self.packet_queue.full():
-                        self.packet_queue.put(packet)
-                        
-                        # Increment packet count and log periodically
-                        self.packet_count += 1
-                        if self.packet_count % 500 == 0:
-                            logger.info(f"📦 Captured {self.packet_count} packets")
-                    else:
-                        logger.warning("⚠️ Packet queue full, dropping packet")
+                # Skip infrastructure traffic (ML backend, dashboard)
+                if src_port in self.excluded_ports or dst_port in self.excluded_ports:
+                    return self.running
+                
+                if not self.packet_queue.full():
+                    self.packet_queue.put(packet)
+                    self.packet_count += 1
+                    if self.packet_count % 100 == 0:
+                        logger.info(f"📦 Captured {self.packet_count} packets")
+                else:
+                    logger.warning("⚠️ Packet queue full, dropping packet")
                 
                 return self.running
                 
@@ -254,10 +279,15 @@ class NetworkMonitor:
                 return self.running
         
         try:
-            sniff(iface=self.interface, prn=packet_handler, stop_filter=lambda x: not self.running)
+            # Try with BPF filter first (faster)
+            sniff(iface=self.interface, prn=packet_handler, filter=bpf_filter, stop_filter=lambda x: not self.running)
         except Exception as e:
-            logger.error(f"Error in packet capture: {str(e)}")
-            self.running = False
+            logger.warning(f"BPF filter failed ({e}), falling back to unfiltered capture...")
+            try:
+                sniff(iface=self.interface, prn=packet_handler, stop_filter=lambda x: not self.running)
+            except Exception as e2:
+                logger.error(f"Error in packet capture: {str(e2)}")
+                self.running = False
 
     def _process_flows(self):
         """Process captured packets into flows."""
@@ -453,10 +483,6 @@ class NetworkMonitor:
             # Get flow information
             src_ip = flow_data['src_ip']
             dst_ip = flow_data['dst_ip']
-            
-            # Skip flows that don't involve our server
-            if not (src_ip == self.server_ip or dst_ip == self.server_ip):
-                return
                 
             # Skip very short flows (less than 2 packets)
             total_packets = len(flow_data['forward_packets']) + len(flow_data['reverse_packets'])
@@ -467,6 +493,8 @@ class NetworkMonitor:
             
             # Determine remote IP and direction
             remote_ip = dst_ip if src_ip == self.server_ip else src_ip
+            if remote_ip == self.server_ip:
+                remote_ip = src_ip  # Both are localhost, pick a reasonable value
             direction = "outbound" if src_ip == self.server_ip else "inbound"
             
             logger.info(f"Flow {self.flow_count}: {src_ip}:{flow_data['src_port']} <-> {dst_ip}:{flow_data['dst_port']} [{direction}]")
@@ -606,7 +634,7 @@ class NetworkMonitor:
         return {feature: 0 for feature in SCAPY_FEATURES}
 
     def _send_for_prediction(self, flow_features: Dict[str, Any], remote_ip: str):
-        """Send flow features to ML model for prediction."""
+        """Send flow features to ML model for prediction, then forward result to dashboard."""
         try:
             logger.info(f"🚀 Sending flow to ML model for prediction: {self.server_ip} <-> {remote_ip}")
             
@@ -616,20 +644,10 @@ class NetworkMonitor:
                 if feature in flow_features:
                     clean_features[feature] = flow_features[feature]
                 else:
-                    # Set default values for missing features
                     clean_features[feature] = 0
 
-            # Log the payload in structured JSON format
-            payload_log = {
-                "timestamp": datetime.now().isoformat(),
-                "flow_id": f"flow_{self.flow_count}",
-                "server_ip": self.server_ip,
-                "remote_ip": remote_ip,
-                "ml_endpoint": self.predict_endpoint,
-                "payload": clean_features
-            }
-            
-            logger.info(f"📤 ML Payload: {json.dumps(payload_log, indent=2, sort_keys=True)}")
+            # Log the payload
+            logger.info(f"📤 Sending prediction request for flow_{self.flow_count}")
 
             # Send to ML endpoint
             response = requests.post(
@@ -645,11 +663,49 @@ class NetworkMonitor:
                 
                 logger.info(f"✅ ML Prediction: {prediction_result} (prob: {attack_prob:.3f})")
                 
+                # Forward prediction + flow metadata to dashboard API
+                self._forward_to_dashboard(clean_features, prediction, remote_ip)
+                
             else:
                 logger.warning(f"❌ ML model returned status {response.status_code}")
                 
         except Exception as e:
             logger.error(f"Error calling ML model for prediction: {str(e)}")
+
+    def _forward_to_dashboard(self, flow_features: Dict[str, Any], ml_prediction: Dict[str, Any], remote_ip: str):
+        """Forward completed prediction to the Next.js dashboard API."""
+        try:
+            # Determine src/dst based on flow direction
+            dashboard_payload = {
+                "timestamp": datetime.now().isoformat(),
+                "src_ip": remote_ip,
+                "dst_ip": self.server_ip,
+                "src_port": int(flow_features.get('src_port', 0)),
+                "dst_port": int(flow_features.get('dst_port', 0)),
+                "protocol": "TCP" if flow_features.get('protocol', 6) == 6 else "UDP",
+                "total_packets": int(flow_features.get('total_packets', 0)),
+                "total_bytes": int(flow_features.get('total_bytes', 0)),
+                "duration": float(flow_features.get('duration', 0)),
+                "connection_state": str(flow_features.get('connection_state', 'CON')),
+                "prediction": ml_prediction.get('prediction', 0),
+                "attack_probability": ml_prediction.get('attack_probability', 0),
+                "features_used": ml_prediction.get('features_used', []),
+                "feature_selection_enabled": ml_prediction.get('feature_selection_enabled', False),
+            }
+
+            resp = requests.post(
+                self.dashboard_predictions_endpoint,
+                json=dashboard_payload,
+                timeout=5.0
+            )
+
+            if resp.status_code == 200:
+                logger.info(f"📊 Forwarded prediction to dashboard")
+            else:
+                logger.warning(f"⚠️ Dashboard API returned {resp.status_code}")
+
+        except Exception as e:
+            logger.debug(f"Could not forward to dashboard (may not be running): {str(e)}")
 
     def _add_to_training_batch(self, flow_features: Dict[str, Any], remote_ip: str):
         """Add flow features to the training batch for sequential training."""
@@ -788,8 +844,10 @@ def main():
     
     # Configuration
     config = {
-        'interface': get_default_interface(),
+        'interface': None,  # Auto-detect (will find loopback adapter for localhost)
         'base_url': 'http://localhost:8080',
+        'dashboard_url': 'http://localhost:3000',
+        'target_port': 5000,  # Port of the target website to monitor
         'mode': 'predict',  # 'train' or 'predict'
         'flow_timeout': 5.0,  # Standard 5 second flows
         'capture_window': 5,  # 5 second capture windows

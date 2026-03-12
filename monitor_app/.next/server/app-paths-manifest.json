@@ -1,5 +1,6 @@
 {
-  "/api/healthcheck/route": "app/api/healthcheck/route.js",
+  "/api/predictions/route": "app/api/predictions/route.js",
+  "/api/ml-status/route": "app/api/ml-status/route.js",
   "/favicon.ico/route": "app/favicon.ico/route.js",
   "/page": "app/page.js"
 }
