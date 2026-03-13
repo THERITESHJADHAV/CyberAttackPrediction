@@ -1,0 +1,18 @@
+======================================================================
+ML MODEL ATTACK DETECTION TEST
+======================================================================
+
+NORMAL | Normal HTTP flow
+   Label: normal | Attack prob: 0.0200 | Confidence: 0.9800
+
+ATTACK | DOS Neptune (SYN flood)
+   Label: attack | Attack prob: 0.5600 | Confidence: 0.5600
+
+ATTACK | Probe Portsweep
+   Label: attack | Attack prob: 1.0000 | Confidence: 1.0000
+
+NORMAL | HTTP flood with high count
+   Label: normal | Attack prob: 0.0000 | Confidence: 1.0000
+
+NORMAL | SQLi (Low count, payload attack)
+   Label: normal | Attack prob: 0.0200 | Confidence: 0.9800

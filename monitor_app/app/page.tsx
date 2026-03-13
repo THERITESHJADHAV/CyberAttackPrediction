@@ -153,7 +153,7 @@ export default function Dashboard() {
         if (res.ok) {
           const data = await res.json();
           setIsOnline(data.status === "healthy");
-          setMlStatus(data.incremental_models_ready ? "Models Ready" : "Models Loading...");
+          setMlStatus(data.models_loaded ? "Models Ready" : "Models Loading...");
         } else {
           setIsOnline(false);
           setMlStatus("ML Backend Offline");
@@ -257,7 +257,7 @@ export default function Dashboard() {
             </div>
             <div className="stat-value purple">{(stats.avgThreatProbability * 100).toFixed(1)}%</div>
             <div className="stat-change neutral">
-              AutoEncoder + SGD
+              Random Forest
             </div>
           </div>
         </section>
@@ -424,7 +424,7 @@ export default function Dashboard() {
 
         {/* ── Footer ── */}
         <footer className="footer">
-          CyberGuard AI — ML Cyber Attack Prediction System &nbsp;|&nbsp; AutoEncoder + SGD Classifier &nbsp;|&nbsp;
+          CyberGuard AI — ML Cyber Attack Prediction System &nbsp;|&nbsp; Random Forest Classifier &nbsp;|&nbsp;
           Local Mode — All predictions from real captured traffic
         </footer>
       </div>

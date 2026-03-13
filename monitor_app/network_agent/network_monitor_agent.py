@@ -82,6 +82,142 @@ SCAPY_FEATURES = [
 # Ports to exclude from monitoring (SSH, DNS, etc.)
 EXCLUDED_PORTS = []
 
+
+class ConnectionTracker:
+    """Track connection statistics across flows for computing KDD traffic features.
+    
+    KDD features like `count`, `srv_count`, `serror_rate`, and `dst_host_*` features
+    require context from MULTIPLE flows. Without this tracker, each flow is treated
+    independently and attack patterns (floods, scans, brute-force) look identical to
+    single normal connections.
+    """
+
+    def __init__(self, window_seconds: float = 120.0):
+        self.window = window_seconds
+        self.lock = threading.Lock()
+        # Each record: (timestamp, dst_ip, dst_port, service, flag, protocol, src_port, is_error, is_rerror)
+        self.records: List[Dict[str, Any]] = []
+
+    def add(self, dst_ip: str, dst_port: int, service: str, flag: str,
+            protocol: str, src_port: int, is_serror: bool, is_rerror: bool):
+        """Record a completed flow."""
+        with self.lock:
+            now = time.time()
+            self.records.append({
+                'time': now,
+                'dst_ip': dst_ip,
+                'dst_port': dst_port,
+                'service': service,
+                'flag': flag,
+                'protocol': protocol,
+                'src_port': src_port,
+                'is_serror': is_serror,
+                'is_rerror': is_rerror,
+            })
+            # Prune old records
+            cutoff = now - self.window
+            self.records = [r for r in self.records if r['time'] > cutoff]
+
+    def get_stats(self, dst_ip: str, dst_port: int, service: str, src_port: int, window: float = 2.0) -> Dict[str, float]:
+        """Compute KDD-style traffic/host features from recent connection history.
+        
+        `window` — short time window (seconds) for `count`/`srv_count` (recent burst).
+        Full history used for `dst_host_*` features.
+        """
+        with self.lock:
+            now = time.time()
+            cutoff_short = now - window
+            cutoff_full = now - self.window
+
+            recent = [r for r in self.records if r['time'] > cutoff_short]
+            full = [r for r in self.records if r['time'] > cutoff_full]
+
+            # --- count / srv_count (connections in the last `window` seconds) ---
+            same_dst = [r for r in recent if r['dst_ip'] == dst_ip]
+            count = float(len(same_dst))
+            srv_count = float(len([r for r in same_dst if r['service'] == service]))
+
+            # --- serror_rate / rerror_rate (over recent same-dst connections) ---
+            if count > 0:
+                serror_rate = len([r for r in same_dst if r['is_serror']]) / count
+                rerror_rate = len([r for r in same_dst if r['is_rerror']]) / count
+            else:
+                serror_rate = 0.0
+                rerror_rate = 0.0
+
+            # --- srv_serror_rate / srv_rerror_rate (same service) ---
+            if srv_count > 0:
+                srv_serror_rate = len([r for r in same_dst if r['service'] == service and r['is_serror']]) / srv_count
+                srv_rerror_rate = len([r for r in same_dst if r['service'] == service and r['is_rerror']]) / srv_count
+            else:
+                srv_serror_rate = 0.0
+                srv_rerror_rate = 0.0
+
+            # --- same_srv_rate / diff_srv_rate ---
+            if count > 0:
+                same_srv_rate = srv_count / count
+                diff_srv_rate = 1.0 - same_srv_rate
+            else:
+                same_srv_rate = 1.0
+                diff_srv_rate = 0.0
+
+            # --- srv_diff_host_rate ---
+            same_srv_records = [r for r in recent if r['service'] == service]
+            if len(same_srv_records) > 1:
+                unique_hosts = len(set(r['dst_ip'] for r in same_srv_records))
+                srv_diff_host_rate = (unique_hosts - 1) / len(same_srv_records)
+            else:
+                srv_diff_host_rate = 0.0
+
+            # --- dst_host_* features (full window, same dst_ip) ---
+            dst_host_records = [r for r in full if r['dst_ip'] == dst_ip]
+            dst_host_count = min(float(len(dst_host_records)), 255.0)
+            dst_host_srv_count = min(float(len([r for r in dst_host_records if r['service'] == service])), 255.0)
+
+            if dst_host_count > 0:
+                dst_host_same_srv_rate = dst_host_srv_count / dst_host_count
+                dst_host_diff_srv_rate = 1.0 - dst_host_same_srv_rate
+                dst_host_same_src_port_rate = len([r for r in dst_host_records if r['src_port'] == src_port]) / dst_host_count
+                dst_host_serror_rate = len([r for r in dst_host_records if r['is_serror']]) / dst_host_count
+                dst_host_rerror_rate = len([r for r in dst_host_records if r['is_rerror']]) / dst_host_count
+            else:
+                dst_host_same_srv_rate = 1.0
+                dst_host_diff_srv_rate = 0.0
+                dst_host_same_src_port_rate = 0.0
+                dst_host_serror_rate = 0.0
+                dst_host_rerror_rate = 0.0
+
+            if dst_host_srv_count > 0:
+                dst_host_srv_diff_host_rate = srv_diff_host_rate
+                dst_host_srv_serror_rate = dst_host_serror_rate
+                dst_host_srv_rerror_rate = dst_host_rerror_rate
+            else:
+                dst_host_srv_diff_host_rate = 0.0
+                dst_host_srv_serror_rate = 0.0
+                dst_host_srv_rerror_rate = 0.0
+
+            return {
+                'count': max(count, 1.0),
+                'srv_count': max(srv_count, 1.0),
+                'serror_rate': serror_rate,
+                'srv_serror_rate': srv_serror_rate,
+                'rerror_rate': rerror_rate,
+                'srv_rerror_rate': srv_rerror_rate,
+                'same_srv_rate': same_srv_rate,
+                'diff_srv_rate': diff_srv_rate,
+                'srv_diff_host_rate': srv_diff_host_rate,
+                'dst_host_count': max(dst_host_count, 1.0),
+                'dst_host_srv_count': max(dst_host_srv_count, 1.0),
+                'dst_host_same_srv_rate': dst_host_same_srv_rate,
+                'dst_host_diff_srv_rate': dst_host_diff_srv_rate,
+                'dst_host_same_src_port_rate': dst_host_same_src_port_rate,
+                'dst_host_srv_diff_host_rate': dst_host_srv_diff_host_rate,
+                'dst_host_serror_rate': dst_host_serror_rate,
+                'dst_host_srv_serror_rate': dst_host_srv_serror_rate,
+                'dst_host_rerror_rate': dst_host_rerror_rate,
+                'dst_host_srv_rerror_rate': dst_host_srv_rerror_rate,
+            }
+
 class NetworkMonitor:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
@@ -135,6 +271,11 @@ class NetworkMonitor:
         
         # Flow tracking
         self.active_flows = {}
+        # Stores payload strings per flow for DPI
+        self.flow_payloads = {}
+        
+        # Connection tracker for cross-flow KDD feature computation
+        self.connection_tracker = ConnectionTracker(window_seconds=120.0)
         
         # Auto-detect the best interface for capturing
         if self.interface is None:
@@ -237,11 +378,11 @@ class NetworkMonitor:
         
         def packet_handler(packet):
             if not self.running:
-                return False
+                return
             
             try:
                 if not packet.haslayer(IP):
-                    return self.running
+                    return
                 
                 src_ip = packet[IP].src
                 dst_ip = packet[IP].dst
@@ -258,11 +399,11 @@ class NetworkMonitor:
                 
                 # Only capture traffic involving the target port
                 if src_port != self.target_port and dst_port != self.target_port:
-                    return self.running
+                    return
                 
                 # Skip infrastructure traffic (ML backend, dashboard)
                 if src_port in self.excluded_ports or dst_port in self.excluded_ports:
-                    return self.running
+                    return
                 
                 if not self.packet_queue.full():
                     self.packet_queue.put(packet)
@@ -272,11 +413,12 @@ class NetworkMonitor:
                 else:
                     logger.warning("⚠️ Packet queue full, dropping packet")
                 
-                return self.running
+                return
                 
             except Exception as e:
                 logger.debug(f"Error processing packet: {str(e)}")
-                return self.running
+                return
+
         
         try:
             # Try with BPF filter first (faster)
@@ -407,8 +549,17 @@ class NetworkMonitor:
                                 'tcp_flags_forward': set(),
                                 'tcp_flags_reverse': set(),
                             }
+                            self.flow_payloads[flow_key] = []
                         
                         flow_data = self.active_flows[flow_key]
+                        
+                        # Extract payload for DPI
+                        if packet.haslayer('Raw') and getattr(packet['Raw'], 'load', None):
+                            try:
+                                payload = packet['Raw'].load.decode('utf-8', errors='ignore')
+                                self.flow_payloads[flow_key].append(payload.lower())
+                            except:
+                                pass
                         
                         # Determine actual packet direction relative to normalized flow
                         actual_forward = ((src_ip == flow_key[0] and dst_ip == flow_key[1] and 
@@ -457,6 +608,7 @@ class NetworkMonitor:
                     logger.info(f"📊 Completing flow: {total_packets} packets (fwd: {len(flow_data['forward_packets'])}, rev: {len(flow_data['reverse_packets'])})")
                     self._process_completed_flow(flow_data)
                 self.active_flows.pop(flow_key, None)
+                self.flow_payloads.pop(flow_key, None)
             
             # Log active flows
             if flows_to_complete:
@@ -501,6 +653,13 @@ class NetworkMonitor:
             
             # Extract scapy-available features
             flow_features = self._extract_scapy_features(flow_data)
+            
+            # Attach combined payloads for DPI
+            flow_key = flow_data.get('flow_key')
+            if flow_key and flow_key in self.flow_payloads:
+                flow_features['combined_payload'] = " ".join(self.flow_payloads[flow_key])
+            else:
+                flow_features['combined_payload'] = ""
             
             # Send to appropriate endpoint based on mode
             if self.mode == 'predict':
@@ -672,15 +831,16 @@ class NetworkMonitor:
         """
         Map raw Scapy flow features to KDD dataset feature names.
         
-        The Random Forest model was trained on KDD features. This maps
-        what we can extract from packets to the KDD format. Features that
-        cannot be extracted from raw packets default to 0.
+        Uses the ConnectionTracker to compute cross-flow traffic features
+        (count, srv_count, serror_rate, dst_host_* etc.) from actual recent
+        connection history rather than static defaults.
         """
         duration = float(flow_features.get('duration', 0))
         total_packets = int(flow_features.get('total_packets', 0))
         forward_bytes = int(flow_features.get('forward_bytes', 0))
         reverse_bytes = int(flow_features.get('reverse_bytes', 0))
         protocol_num = int(flow_features.get('protocol', 6))
+        src_port = int(flow_features.get('src_port', 0))
         dst_port = int(flow_features.get('dst_port', 0))
         syn_count = int(flow_features.get('syn_count', 0))
         fin_count = int(flow_features.get('fin_count', 0))
@@ -688,7 +848,6 @@ class NetworkMonitor:
         ack_count = int(flow_features.get('ack_count', 0))
         is_bidir = int(flow_features.get('is_bidirectional', 0))
         conn_state = flow_features.get('connection_state', 'CON')
-        pps = float(flow_features.get('packets_per_second', 0))
 
         # Protocol type mapping
         proto_map = {6: 'tcp', 17: 'udp', 1: 'icmp'}
@@ -704,7 +863,7 @@ class NetworkMonitor:
         }
         service = port_service_map.get(dst_port, 'other')
 
-        # Flag mapping based on TCP connection state
+        # Flag mapping based on TCP connection state and flags
         flag_map = {
             'CON': 'SF',       # Normal connection
             'SYN': 'S0',       # SYN sent, no reply
@@ -712,10 +871,11 @@ class NetworkMonitor:
             'FIN': 'SF',       # Normal termination
             'RST': 'REJ',      # Connection rejected
             'ESTABLISHED': 'SF',
+            'INT': 'S0',       # Interrupted (no response) → SYN-only
         }
         flag = flag_map.get(str(conn_state), 'SF')
         
-        # If RST was seen, that's a rejection
+        # Override flag based on actual TCP flags seen
         if rst_count > 0 and syn_count > 0 and ack_count == 0:
             flag = 'REJ'
         elif rst_count > 0:
@@ -723,9 +883,59 @@ class NetworkMonitor:
         elif syn_count > 0 and not is_bidir:
             flag = 'S0'
 
-        # Calculate rates
-        serror_rate = 1.0 if syn_count > 0 and not is_bidir else 0.0
-        rerror_rate = 1.0 if rst_count > 0 else 0.0
+        # === Deep Packet Inspection (DPI) Heuristics ===
+        # The KDD dataset uses content features to detect attacks like SQLi/XSS/Brute Force.
+        # We manually bridge raw packets to KDD content features here.
+        hot = 0.0          # Indicators of bad logins, directory traversal
+        num_comp = 0.0     # SQLi, rootkits, compromise indicators
+        num_failed = 0.0   # Failed logins (brute force)
+        
+        payload = flow_features.get('combined_payload', '')
+        
+        # 1. SQL Injection Signatures
+        sqli_sigs = ['union select', '1=1', 'drop table', 'or 1=1', '--', 'waitfor delay']
+        if any(sig in payload for sig in sqli_sigs):
+            num_comp += 2.0
+            hot += 1.0
+            logger.info(f"🚨 DPI: SQL Injection signature detected in payload")
+            
+        # 2. Path Traversal & Command Injection
+        if '../' in payload or '/etc/passwd' in payload or 'cmd.exe' in payload or '/bin/sh' in payload:
+            num_comp += 3.0
+            hot += 2.0
+            logger.info(f"🚨 DPI: Command/Path traversal signature detected")
+            
+        # 3. Web Brute Force (simulate multiple failed logins)
+        if 'login' in payload and ('admin' in payload or 'password' in payload):
+            hot += 1.0
+            if is_bidir and duration < 0.5: # Fast failed login response
+                num_failed += 1.0
+
+        # Determine per-flow error indicators
+        is_serror = (syn_count > 0 and not is_bidir)  # SYN without response
+        is_rerror = (rst_count > 0)  # RST seen
+
+        # Record this connection in the tracker BEFORE getting stats
+        # (so it counts itself in the statistics)
+        dst_ip = self.server_ip  # The destination is our server
+        self.connection_tracker.add(
+            dst_ip=dst_ip, dst_port=dst_port, service=service, flag=flag,
+            protocol=protocol_type, src_port=src_port,
+            is_serror=is_serror, is_rerror=is_rerror
+        )
+
+        # Get cross-flow traffic statistics from the ConnectionTracker
+        traffic_stats = self.connection_tracker.get_stats(
+            dst_ip=dst_ip, dst_port=dst_port, service=service,
+            src_port=src_port, window=2.0
+        )
+
+        # Aggressive HTTP Flood Detection Rule (bridges Scapy to KDD)
+        # If we see >50 connections per second to same host, treat as high diff_srv_rate 
+        # to trigger the KDDCup model's DoS/Probe detectors
+        if traffic_stats['count'] > 50 and service == 'http':
+            traffic_stats['diff_srv_rate'] = max(traffic_stats['diff_srv_rate'], 0.8)
+            traffic_stats['srv_diff_host_rate'] = max(traffic_stats['srv_diff_host_rate'], 0.8)
 
         kdd = {
             # === Features we CAN extract from packets ===
@@ -735,16 +945,16 @@ class NetworkMonitor:
             'flag': flag,
             'src_bytes': float(forward_bytes),
             'dst_bytes': float(reverse_bytes),
-            'land': 1.0 if flow_features.get('src_port', 0) == flow_features.get('dst_port', 0) else 0.0,
+            'land': 1.0 if src_port == dst_port else 0.0,
             'wrong_fragment': 0.0,
             'urgent': 0.0,
             
-            # === Content features (cannot extract from raw packets — default to 0) ===
-            'hot': 0.0,
-            'num_failed_logins': 0.0,
+            # === Content features (bridged via DPI heuristics) ===
+            'hot': hot,
+            'num_failed_logins': num_failed,
             'logged_in': 1.0 if is_bidir and fin_count > 0 else 0.0,
-            'num_compromised': 0.0,
-            'root_shell': 0.0,
+            'num_compromised': num_comp,
+            'root_shell': 1.0 if '/bin/sh' in payload else 0.0,
             'su_attempted': 0.0,
             'num_root': 0.0,
             'num_file_creations': 0.0,
@@ -754,29 +964,36 @@ class NetworkMonitor:
             'is_host_login': 0.0,
             'is_guest_login': 0.0,
             
-            # === Traffic features (computed from flow statistics) ===
-            'count': float(total_packets),
-            'srv_count': float(total_packets),  # Same service count
-            'serror_rate': serror_rate,
-            'srv_serror_rate': serror_rate,
-            'rerror_rate': rerror_rate,
-            'srv_rerror_rate': rerror_rate,
-            'same_srv_rate': 1.0,  # All connections to the same service
-            'diff_srv_rate': 0.0,
-            'srv_diff_host_rate': 0.0,
+            # === Traffic features (from ConnectionTracker — cross-flow context) ===
+            'count': traffic_stats['count'],
+            'srv_count': traffic_stats['srv_count'],
+            'serror_rate': traffic_stats['serror_rate'],
+            'srv_serror_rate': traffic_stats['srv_serror_rate'],
+            'rerror_rate': traffic_stats['rerror_rate'],
+            'srv_rerror_rate': traffic_stats['srv_rerror_rate'],
+            'same_srv_rate': traffic_stats['same_srv_rate'],
+            'diff_srv_rate': traffic_stats['diff_srv_rate'],
+            'srv_diff_host_rate': traffic_stats['srv_diff_host_rate'],
             
-            # === Host-based features (approximated from flow) ===
-            'dst_host_count': min(float(total_packets), 255.0),
-            'dst_host_srv_count': min(float(total_packets), 255.0),
-            'dst_host_same_srv_rate': 1.0,
-            'dst_host_diff_srv_rate': 0.0,
-            'dst_host_same_src_port_rate': 1.0 if total_packets > 5 else 0.5,
-            'dst_host_srv_diff_host_rate': 0.0,
-            'dst_host_serror_rate': serror_rate,
-            'dst_host_srv_serror_rate': serror_rate,
-            'dst_host_rerror_rate': rerror_rate,
-            'dst_host_srv_rerror_rate': rerror_rate,
+            # === Host-based features (from ConnectionTracker) ===
+            'dst_host_count': traffic_stats['dst_host_count'],
+            'dst_host_srv_count': traffic_stats['dst_host_srv_count'],
+            'dst_host_same_srv_rate': traffic_stats['dst_host_same_srv_rate'],
+            'dst_host_diff_srv_rate': traffic_stats['dst_host_diff_srv_rate'],
+            'dst_host_same_src_port_rate': traffic_stats['dst_host_same_src_port_rate'],
+            'dst_host_srv_diff_host_rate': traffic_stats['dst_host_srv_diff_host_rate'],
+            'dst_host_serror_rate': traffic_stats['dst_host_serror_rate'],
+            'dst_host_srv_serror_rate': traffic_stats['dst_host_srv_serror_rate'],
+            'dst_host_rerror_rate': traffic_stats['dst_host_rerror_rate'],
+            'dst_host_srv_rerror_rate': traffic_stats['dst_host_srv_rerror_rate'],
         }
+
+        logger.info(f"📊 KDD features: count={traffic_stats['count']:.0f}, "
+                     f"srv_count={traffic_stats['srv_count']:.0f}, "
+                     f"dst_host_count={traffic_stats['dst_host_count']:.0f}, "
+                     f"serror_rate={traffic_stats['serror_rate']:.2f}, "
+                     f"rerror_rate={traffic_stats['rerror_rate']:.2f}, "
+                     f"flag={flag}")
 
         return kdd
 

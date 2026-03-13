@@ -133,10 +133,10 @@ def predict_attack():
         df = map_raw_to_kdd(raw_data)
 
         # Scale features (same StandardScaler used in training)
-        X_scaled = scaler.transform(df.values)  # type: ignore
+        # Use .values.astype(float) to avoid sklearn warning about feature names
+        X_scaled = scaler.transform(df.values.astype(float))  # type: ignore
 
-        # Predict
-        prediction = int(rf_model.predict(X_scaled)[0])  # type: ignore
+        # Predict probabilities
         probabilities = rf_model.predict_proba(X_scaled)[0]  # type: ignore
 
         # In the LabelEncoder: attack=0, normal=1
@@ -148,10 +148,14 @@ def predict_attack():
         rounded_attack_prob: float = float(f"{attack_prob:.4f}")
         rounded_max_prob: float = float(f"{max_prob:.4f}")
 
-        # Map prediction to label
-        assert label_encoder is not None
-        predicted_label = label_encoder.inverse_transform([prediction])[0]
-        is_attack = 1 if predicted_label == 'attack' else 0
+        # Map prediction to label using a custom threshold for higher sensitivity
+        # KDDCup features mapped from live traffic need a lower threshold
+        if attack_prob >= 0.35:
+            is_attack = 1
+            predicted_label = 'attack'
+        else:
+            is_attack = 0
+            predicted_label = 'normal'
 
         logger.info(f"{'🚨' if is_attack else '✅'} Prediction: {'ATTACK' if is_attack else 'NORMAL'} "
                      f"(prob: {attack_prob:.3f}) for IP: {src_ip}")
