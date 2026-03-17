@@ -53,17 +53,47 @@ The diagram above illustrates the complete data flow and deployment pipeline of 
 
 ```
 CyberAttackPrediction/
-├── CF_NETWORK_ATTACK_PREDICTION.yml  # CloudFormation infrastructure template
-├── monitor-app/                       # Network monitoring & web dashboard
-│   ├── app/                          # Next.js application
-│   ├── network_agent/                # Python network traffic capture agent
-│   └── code-deploy-scripts/          # Deployment automation scripts
-├── ml-service/                        # Machine learning prediction service
-│   ├── ml_ec2_service.py            # Flask API server
-│   ├── modules/                      # ML pipeline components
-│   ├── artifacts/                    # Trained models storage
-│   └── code-deploy-scripts/          # Deployment automation scripts
-└── README.md                          # This file
+├── target_website/
+│   ├── app.py                  # Flask demo web application (port 5000)
+│   ├── simulate_attack.py      # Attack traffic simulator
+│   ├── IDS.ipynb               # Full training & evaluation notebook
+│   ├── kdd_train.csv           # KDD training dataset
+│   ├── kdd_test.csv            # KDD test dataset
+│   └── workflow.png / ml_pipeline.png
+│
+├── ml_service/
+│   ├── ml_ec2_service.py       # Flask ML prediction API (port 8080)
+│   ├── batch_train.py          # Full batch training script
+│   ├── incremental_train.py    # Streaming / incremental training
+│   ├── train_rf_model.py       # Random Forest trainer
+│   ├── config.py               # Service configuration
+│   ├── test_predict.py         # Prediction testing script
+│   ├── requirements.txt
+│   ├── dataset/
+│   │   ├── UNSW_NB15_train.csv
+│   │   └── UNSW_NB15_test.csv
+│   ├── modules/
+│   │   ├── data_preprocessing.py   # Mixed data preprocessor
+│   │   ├── incremental_scaler.py   # Robust adaptive scaler
+│   │   ├── orc_selector.py         # Online feature selector
+│   │   ├── sklearn_wrapper.py      # Model wrapper utilities
+│   │   └── stream_utils.py         # Streaming data helpers
+│   ├── artifacts/                  # Saved model files
+│   │   ├── ae.pt                   # AutoEncoder (PyTorch)
+│   │   ├── rf.pkl                  # Random Forest model
+│   │   ├── preprocessor.pkl        # Fitted preprocessor
+│   │   └── selected_features.txt
+│   └── rf_artifacts/               # RF-specific saved objects
+│       ├── rf_model.pkl
+│       ├── scaler.pkl
+│       ├── label_encoder.pkl
+│       └── feature_columns.pkl
+│
+└── monitor_app/
+    ├── app/                        # Next.js pages & components
+    ├── network_agent/              # Python packet capture agent
+    ├── appspec.yml
+    └── buildspec-dual-asg.yml                       # This file
 ```
 
 ## 🚀 One-Click AWS Deployment
