@@ -890,26 +890,28 @@ class NetworkMonitor:
         num_comp = 0.0     # SQLi, rootkits, compromise indicators
         num_failed = 0.0   # Failed logins (brute force)
         
-        payload = flow_features.get('combined_payload', '')
+        import urllib.parse
+        raw_payload = flow_features.get('combined_payload', '')
+        payload = urllib.parse.unquote_plus(raw_payload).lower()
         
         # 1. SQL Injection Signatures
         sqli_sigs = ['union select', '1=1', 'drop table', 'or 1=1', '--', 'waitfor delay']
         if any(sig in payload for sig in sqli_sigs):
-            num_comp += 2.0
-            hot += 1.0
+            num_comp += 10.0
+            hot += 5.0
             logger.info(f"🚨 DPI: SQL Injection signature detected in payload")
             
         # 2. Path Traversal & Command Injection
         if '../' in payload or '/etc/passwd' in payload or 'cmd.exe' in payload or '/bin/sh' in payload:
-            num_comp += 3.0
-            hot += 2.0
+            num_comp += 10.0
+            hot += 5.0
             logger.info(f"🚨 DPI: Command/Path traversal signature detected")
             
         # 3. Web Brute Force (simulate multiple failed logins)
         if 'login' in payload and ('admin' in payload or 'password' in payload):
-            hot += 1.0
+            hot += 5.0
             if is_bidir and duration < 0.5: # Fast failed login response
-                num_failed += 1.0
+                num_failed += 5.0
 
         # Determine per-flow error indicators
         is_serror = (syn_count > 0 and not is_bidir)  # SYN without response

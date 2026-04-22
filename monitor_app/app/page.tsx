@@ -36,6 +36,18 @@ interface ActivityItem {
   time: string;
 }
 
+interface AttackNotification {
+  id: string;
+  severity: "critical" | "high" | "medium";
+  title: string;
+  message: string;
+  srcIp: string;
+  dstIp: string;
+  probability: number;
+  timestamp: Date;
+  dismissed: boolean;
+}
+
 /* ─── Helpers ─── */
 const formatTime = (d: Date | string) => {
   const date = typeof d === "string" ? new Date(d) : d;
@@ -44,6 +56,114 @@ const formatTime = (d: Date | string) => {
 
 const formatBytes = (b: number) =>
   b > 1_000_000 ? `${(b / 1_000_000).toFixed(1)} MB` : b > 1_000 ? `${(b / 1_000).toFixed(1)} KB` : `${b} B`;
+
+/* ─── Sound Alert System using Web Audio API ─── */
+class AlertSoundSystem {
+  private audioContext: AudioContext | null = null;
+  private isEnabled: boolean = true;
+  private hasInteracted: boolean = false;
+
+  enable() { this.isEnabled = true; }
+  disable() { this.isEnabled = false; }
+  get enabled() { return this.isEnabled; }
+
+  initContext = () => {
+    // If we've already interacted and the context is running, nothing to do
+    if (this.hasInteracted && this.audioContext?.state === "running") return;
+
+    try {
+      if (!this.audioContext) {
+        this.audioContext = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+      }
+      if (this.audioContext.state === "suspended") {
+        this.audioContext.resume();
+      }
+      this.hasInteracted = true;
+    } catch {
+      // ignore
+    }
+  };
+
+  private getContext(): AudioContext | null {
+    if (!this.audioContext) {
+      this.initContext();
+    }
+    return this.audioContext;
+  }
+
+  playCriticalAlert() {
+    if (!this.isEnabled) return;
+    const ctx = this.getContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+
+    // Three-tone urgent alarm: rising pitch siren
+    const frequencies = [880, 1100, 1320, 1100, 880, 1100, 1320];
+    const noteDuration = 0.12;
+
+    frequencies.forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc.type = "square";
+      osc.frequency.setValueAtTime(freq, now + i * noteDuration);
+      gain.gain.setValueAtTime(0.15, now + i * noteDuration);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + (i + 1) * noteDuration);
+
+      osc.start(now + i * noteDuration);
+      osc.stop(now + (i + 1) * noteDuration);
+    });
+  }
+
+  playHighAlert() {
+    if (!this.isEnabled) return;
+    const ctx = this.getContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+
+    // Two-tone warning beep
+    [660, 880, 660].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(freq, now + i * 0.15);
+      gain.gain.setValueAtTime(0.12, now + i * 0.15);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + (i + 1) * 0.15);
+
+      osc.start(now + i * 0.15);
+      osc.stop(now + (i + 1) * 0.15);
+    });
+  }
+
+  playMediumAlert() {
+    if (!this.isEnabled) return;
+    const ctx = this.getContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+
+    // Single soft beep
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(520, now);
+    gain.gain.setValueAtTime(0.08, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+
+    osc.start(now);
+    osc.stop(now + 0.3);
+  }
+}
 
 /* ─── Dashboard Component ─── */
 export default function Dashboard() {
@@ -57,6 +177,137 @@ export default function Dashboard() {
   const [agentConnected, setAgentConnected] = useState(false);
   const prevFlowCountRef = useRef(0);
   const lastTimestampRef = useRef<string | null>(null);
+
+  /* ─── Attack Notification State ─── */
+  const [notifications, setNotifications] = useState<AttackNotification[]>([]);
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [totalAttackAlerts, setTotalAttackAlerts] = useState(0);
+  const [showNotifPanel, setShowNotifPanel] = useState(false);
+  const [notifHistory, setNotifHistory] = useState<AttackNotification[]>([]);
+  const soundSystemRef = useRef<AlertSoundSystem | null>(null);
+  const processedAttackIdsRef = useRef<Set<string>>(new Set());
+
+  /* Initialize sound system and interaction listener */
+  useEffect(() => {
+    soundSystemRef.current = new AlertSoundSystem();
+
+    // Browsers block audio unless the user has interacted with the page.
+    const handleUserInteraction = () => {
+      soundSystemRef.current?.initContext();
+      window.removeEventListener("click", handleUserInteraction);
+      window.removeEventListener("keydown", handleUserInteraction);
+    };
+
+    window.addEventListener("click", handleUserInteraction);
+    window.addEventListener("keydown", handleUserInteraction);
+
+    return () => {
+      window.removeEventListener("click", handleUserInteraction);
+      window.removeEventListener("keydown", handleUserInteraction);
+      soundSystemRef.current = null;
+    };
+  }, []);
+
+  /* Toggle sound */
+  useEffect(() => {
+    if (soundSystemRef.current) {
+      if (soundEnabled) {
+        soundSystemRef.current.enable();
+      } else {
+        soundSystemRef.current.disable();
+      }
+    }
+  }, [soundEnabled]);
+
+  /* Auto-dismiss notifications after 8 seconds */
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setNotifications((prev) =>
+        prev.filter((n) => {
+          const age = Date.now() - n.timestamp.getTime();
+          return age < 8000 && !n.dismissed;
+        })
+      );
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  /* Create attack notification */
+  const createAttackNotification = useCallback((pred: PredictionEntry) => {
+    // Skip if already processed
+    if (processedAttackIdsRef.current.has(pred.id)) return;
+    processedAttackIdsRef.current.add(pred.id);
+
+    // Keep processed IDs set manageable
+    if (processedAttackIdsRef.current.size > 500) {
+      const ids = Array.from(processedAttackIdsRef.current);
+      processedAttackIdsRef.current = new Set(ids.slice(ids.length - 200));
+    }
+
+    const severity: AttackNotification["severity"] =
+      pred.attackProbability > 0.8 ? "critical" :
+      pred.attackProbability > 0.5 ? "high" : "medium";
+
+    const severityTitles = {
+      critical: "🚨 CRITICAL ATTACK DETECTED",
+      high: "⚠️ HIGH THREAT DETECTED",
+      medium: "🔶 SUSPICIOUS ACTIVITY",
+    };
+
+    const severityMessages = {
+      critical: `Critical intrusion detected with ${(pred.attackProbability * 100).toFixed(1)}% confidence. Immediate action required!`,
+      high: `High-risk traffic detected with ${(pred.attackProbability * 100).toFixed(1)}% attack probability.`,
+      medium: `Anomalous network activity detected. Probability: ${(pred.attackProbability * 100).toFixed(1)}%`,
+    };
+
+    const notif: AttackNotification = {
+      id: `notif_${pred.id}_${Date.now()}`,
+      severity,
+      title: severityTitles[severity],
+      message: severityMessages[severity],
+      srcIp: pred.srcIp,
+      dstIp: pred.dstIp,
+      probability: pred.attackProbability,
+      timestamp: new Date(),
+      dismissed: false,
+    };
+
+    // Add to active notifications (max 5 visible)
+    setNotifications((prev) => [notif, ...prev].slice(0, 5));
+
+    // Add to history
+    setNotifHistory((prev) => [notif, ...prev].slice(0, 50));
+
+    // Increment attack counter
+    setTotalAttackAlerts((prev) => prev + 1);
+
+    // Play sound alert
+    if (soundSystemRef.current) {
+      switch (severity) {
+        case "critical":
+          soundSystemRef.current.playCriticalAlert();
+          break;
+        case "high":
+          soundSystemRef.current.playHighAlert();
+          break;
+        case "medium":
+          soundSystemRef.current.playMediumAlert();
+          break;
+      }
+    }
+  }, []);
+
+  /* Dismiss notification */
+  const dismissNotification = useCallback((id: string) => {
+    setNotifications((prev) =>
+      prev.map((n) => (n.id === id ? { ...n, dismissed: true } : n))
+    );
+  }, []);
+
+  /* Clear all notifications */
+  const clearAllNotifications = useCallback(() => {
+    setNotifications([]);
+  }, []);
 
   /* Clock */
   useEffect(() => {
@@ -134,6 +385,13 @@ export default function Dashboard() {
             const avgProb = recent.reduce((s, p) => s + p.attackProbability, 0) / recent.length;
             return Math.round(avgProb * 100);
           });
+
+          // ─── ATTACK NOTIFICATION TRIGGER ───
+          newPredictions.forEach((pred) => {
+            if (pred.prediction === 1) {
+              createAttackNotification(pred);
+            }
+          });
         }
       } catch {
         /* silently retry next interval */
@@ -143,7 +401,7 @@ export default function Dashboard() {
     poll();
     const interval = setInterval(poll, 2000);
     return () => clearInterval(interval);
-  }, [stats, predictionToActivity]);
+  }, [stats, predictionToActivity, createAttackNotification]);
 
   /* Poll ML status */
   useEffect(() => {
@@ -195,6 +453,48 @@ export default function Dashboard() {
       <div className="bg-grid" />
       <div className="scan-line" />
 
+      {/* ── Attack Notification Toasts ── */}
+      <div className="notification-container" id="notification-container">
+        {notifications
+          .filter((n) => !n.dismissed)
+          .map((notif, index) => (
+            <div
+              key={notif.id}
+              className={`attack-toast ${notif.severity} ${index === 0 ? "toast-enter" : ""}`}
+              style={{ animationDelay: `${index * 0.1}s` }}
+            >
+              <div className="toast-severity-bar" />
+              <div className="toast-content">
+                <div className="toast-header">
+                  <span className="toast-title">{notif.title}</span>
+                  <button
+                    className="toast-close"
+                    onClick={() => dismissNotification(notif.id)}
+                    aria-label="Dismiss notification"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <p className="toast-message">{notif.message}</p>
+                <div className="toast-meta">
+                  <span className="toast-meta-item">
+                    📡 {notif.srcIp} → {notif.dstIp}
+                  </span>
+                  <span className="toast-meta-item">
+                    🎯 {(notif.probability * 100).toFixed(1)}%
+                  </span>
+                  <span className="toast-meta-item">
+                    🕐 {formatTime(notif.timestamp)}
+                  </span>
+                </div>
+                <div className="toast-progress">
+                  <div className={`toast-progress-bar ${notif.severity}`} />
+                </div>
+              </div>
+            </div>
+          ))}
+      </div>
+
       <div className="app-container">
         {/* ── Header ── */}
         <header className="header">
@@ -206,6 +506,29 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="header-status">
+            {/* Sound Toggle */}
+            <button
+              className={`sound-toggle ${soundEnabled ? "on" : "off"}`}
+              onClick={() => setSoundEnabled(!soundEnabled)}
+              title={soundEnabled ? "Sound alerts ON — Click to mute" : "Sound alerts OFF — Click to unmute"}
+              id="sound-toggle-btn"
+            >
+              {soundEnabled ? "🔊" : "🔇"}
+            </button>
+
+            {/* Attack Alert Badge */}
+            <button
+              className={`alert-badge-btn ${totalAttackAlerts > 0 ? "has-alerts" : ""}`}
+              onClick={() => setShowNotifPanel(!showNotifPanel)}
+              title="View attack notifications"
+              id="alert-badge-btn"
+            >
+              🔔
+              {totalAttackAlerts > 0 && (
+                <span className="alert-count">{totalAttackAlerts > 99 ? "99+" : totalAttackAlerts}</span>
+              )}
+            </button>
+
             <span className={`status-badge ${isOnline ? "online" : "offline"}`}>
               <span className={`status-dot ${isOnline ? "online" : "offline"}`} />
               {isOnline ? mlStatus : "ML Offline"}
@@ -217,6 +540,60 @@ export default function Dashboard() {
             <span className="header-time">{formatTime(currentTime)}</span>
           </div>
         </header>
+
+        {/* ── Notification History Panel ── */}
+        {showNotifPanel && (
+          <div className="notif-panel-overlay" onClick={() => setShowNotifPanel(false)}>
+            <div className="notif-panel" onClick={(e) => e.stopPropagation()}>
+              <div className="notif-panel-header">
+                <h3>🔔 Attack Alert History</h3>
+                <div className="notif-panel-actions">
+                  <button
+                    className="notif-clear-btn"
+                    onClick={() => {
+                      setNotifHistory([]);
+                      setTotalAttackAlerts(0);
+                      clearAllNotifications();
+                    }}
+                  >
+                    Clear All
+                  </button>
+                  <button
+                    className="notif-close-btn"
+                    onClick={() => setShowNotifPanel(false)}
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+              <div className="notif-panel-body">
+                {notifHistory.length === 0 ? (
+                  <div className="notif-empty">
+                    <div className="notif-empty-icon">🛡️</div>
+                    <p>No attack alerts yet</p>
+                    <p className="notif-empty-sub">Alerts will appear here when threats are detected</p>
+                  </div>
+                ) : (
+                  notifHistory.map((notif) => (
+                    <div key={notif.id} className={`notif-history-item ${notif.severity}`}>
+                      <div className={`notif-severity-dot ${notif.severity}`} />
+                      <div className="notif-history-content">
+                        <div className="notif-history-title">{notif.title}</div>
+                        <div className="notif-history-msg">{notif.message}</div>
+                        <div className="notif-history-meta">
+                          {notif.srcIp} → {notif.dstIp} · {formatTime(notif.timestamp)}
+                        </div>
+                      </div>
+                      <div className={`notif-prob ${notif.severity}`}>
+                        {(notif.probability * 100).toFixed(0)}%
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ── Stats ── */}
         <section className="stats-grid">
@@ -230,14 +607,14 @@ export default function Dashboard() {
               {agentConnected ? "▲ Live capture" : "⏳ Waiting for packets"}
             </div>
           </div>
-          <div className="stat-card red">
+          <div className={`stat-card red ${stats.attacksDetected > 0 ? "attack-pulse" : ""}`}>
             <div className="stat-header">
               <span className="stat-label">Attacks Detected</span>
               <span className="stat-icon">🚨</span>
             </div>
             <div className="stat-value red">{stats.attacksDetected}</div>
             <div className="stat-change neutral">
-              ML classification active
+              {stats.attacksDetected > 0 ? `🔴 ${totalAttackAlerts} alerts triggered` : "ML classification active"}
             </div>
           </div>
           <div className="stat-card green">
@@ -394,7 +771,7 @@ export default function Dashboard() {
                   flows.slice(0, 15).map((f) => {
                     const verdict = getVerdict(f);
                     return (
-                      <tr key={f.id} className="fade-in">
+                      <tr key={f.id} className={`fade-in ${verdict === "threat" ? "threat-row-highlight" : ""}`}>
                         <td>{formatTime(f.timestamp)}</td>
                         <td>{f.srcIp}:{f.srcPort}</td>
                         <td>{f.dstIp}:{f.dstPort}</td>
