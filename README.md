@@ -53,18 +53,259 @@ The diagram above illustrates the complete data flow and deployment pipeline of 
 
 ```
 CyberAttackPrediction/
-├── CF_NETWORK_ATTACK_PREDICTION.yml  # CloudFormation infrastructure template
-├── monitor-app/                       # Network monitoring & web dashboard
-│   ├── app/                          # Next.js application
-│   ├── network_agent/                # Python network traffic capture agent
-│   └── code-deploy-scripts/          # Deployment automation scripts
-├── ml-service/                        # Machine learning prediction service
-│   ├── ml_ec2_service.py            # Flask API server
-│   ├── modules/                      # ML pipeline components
-│   ├── artifacts/                    # Trained models storage
-│   └── code-deploy-scripts/          # Deployment automation scripts
-└── README.md                          # This file
+├── target_website/
+│   ├── app.py                  # Flask demo web application (port 5000)
+│   ├── simulate_attack.py      # Attack traffic simulator
+│   ├── IDS.ipynb               # Full training & evaluation notebook
+│   ├── kdd_train.csv           # KDD training dataset
+│   ├── kdd_test.csv            # KDD test dataset
+│   └── workflow.png / ml_pipeline.png
+│
+├── ml_service/
+│   ├── ml_ec2_service.py       # Flask ML prediction API (port 8080)
+│   ├── batch_train.py          # Full batch training script
+│   ├── incremental_train.py    # Streaming / incremental training
+│   ├── train_rf_model.py       # Random Forest trainer
+│   ├── config.py               # Service configuration
+│   ├── test_predict.py         # Prediction testing script
+│   ├── requirements.txt
+│   ├── dataset/
+│   │   ├── UNSW_NB15_train.csv
+│   │   └── UNSW_NB15_test.csv
+│   ├── modules/
+│   │   ├── data_preprocessing.py   # Mixed data preprocessor
+│   │   ├── incremental_scaler.py   # Robust adaptive scaler
+│   │   ├── orc_selector.py         # Online feature selector
+│   │   ├── sklearn_wrapper.py      # Model wrapper utilities
+│   │   └── stream_utils.py         # Streaming data helpers
+│   ├── artifacts/                  # Saved model files
+│   │   ├── ae.pt                   # AutoEncoder (PyTorch)
+│   │   ├── rf.pkl                  # Random Forest model
+│   │   ├── preprocessor.pkl        # Fitted preprocessor
+│   │   └── selected_features.txt
+│   └── rf_artifacts/               # RF-specific saved objects
+│       ├── rf_model.pkl
+│       ├── scaler.pkl
+│       ├── label_encoder.pkl
+│       └── feature_columns.pkl
+│
+└── monitor_app/
+    ├── app/                        # Next.js pages & components
+    ├── network_agent/              # Python packet capture agent
+    ├── appspec.yml
+    └── buildspec-dual-asg.yml                       # This file
 ```
+
+--
+
+## 🧠 Machine Learning Pipeline
+
+### Dataset
+The notebook (`IDS.ipynb`) trains on the **KDD Cup 99** dataset:
+- **Train**: 48,381 samples × 43 features
+- **Test**: 22,544 samples × 43 features
+- Binary labels: `normal` vs `attack`
+
+### Models Trained & Compared
+
+| Model | Accuracy | Precision | Recall |
+|---|---|---|---|
+| Logistic Regression | 80.77% | 71.57% | 91.83% |
+| Random Forest | 80.49% | 69.70% | 97.23% |
+| SVM (LinearSVC) | 80.55% | 71.30% | 91.79% |
+| KNN (k=5) | 79.00% | 69.19% | 92.40% |
+| **Decision Tree** | **86.40%** | **77%** | **97%** |
+
+### GAN-Based Data Augmentation
+The dataset has severe class imbalance in rare attack types:
+```
+Normal    67,343
+DoS       45,927
+Probe     11,656
+R2L          995   ← rare
+U2R           52   ← extremely rare
+```
+
+A **Generative Adversarial Network (GAN)** was trained on R2L + U2R samples
+to generate 2,000 synthetic rare-attack samples:
+- Generator: noise(32) → Dense(64) → Dense(128) → Dense(54, sigmoid)
+- Discriminator: Dense(128) → Dense(64) → Dense(1, sigmoid)
+- Training: 2,000 epochs, batch size 32
+
+> **Observation**: While the baseline Random Forest achieved 80.49% accuracy,
+> training on GAN-augmented data reduced accuracy to 27.3%, indicating the
+> synthetic samples did not faithfully capture the original distribution.
+> Selective augmentation or improved GAN training remains future work.
+
+
+### Preprocessing Pipeline (`data_preprocessing.py`)
+- Automatic numerical / categorical type detection
+- Label encoding for all categorical features (`protocol_type`, `service`, `flag`)
+- `RobustIncrementalScaler` with adaptive learning rate (α = 0.01)
+- Log transformation for features with extreme value ranges (>10,000)
+- Graceful handling of unknown categories during inference (`→ -1`)
+
+---
+
+## 🌐 Target Website (`target_website/app.py`)
+
+A simple Flask web app running on **port 5000** that acts as the traffic target
+for the IDS to monitor.
+```bash
+cd target_website
+pip install flask
+python app.py
+```
+
+Browse to `http://localhost:5000` to generate normal traffic.
+Available API endpoints:
+- `GET /api/users`
+- `GET /api/products`
+- `GET /api/transactions`
+- `GET /api/health`
+- `GET /api/search?q=<query>`
+- `GET /api/login`
+
+---
+
+## 🚨 Attack Simulator (`simulate_attack.py`)
+
+Generates 6 categories of attack traffic against `localhost:5000`:
+```bash
+python simulate_attack.py              # Run all attacks
+python simulate_attack.py --type flood       # HTTP flood (DDoS-like)
+python simulate_attack.py --type bruteforce  # Login brute force
+python simulate_attack.py --type sqli        # SQL injection probing
+python simulate_attack.py --type scan        # Port scan
+python simulate_attack.py --type burst       # Rapid TCP burst
+python simulate_attack.py --type slowloris   # Slow connection drain
+```
+
+
+Attack phases (when running `--type all`):
+1. HTTP Flood — 30 threads, 15 seconds
+2. Brute Force Login — 150 rapid credential attempts
+3. SQL Injection — 80 payload variations
+4. Rapid TCP Burst — 8 bursts × 15 connections
+5. Port Scan — ports 4995–5010
+6. Slowloris — 20 slow connections held for 10 seconds
+
+---
+## ⚙️ ML Service (`ml_service/`)
+
+Flask REST API serving predictions on **port 8080**.
+
+### Setup
+```bash
+cd ml_service
+pip install -r requirements.txt
+```
+
+### Train models
+```bash
+python batch_train.py          # Full batch training on KDD / UNSW-NB15
+python train_rf_model.py       # Train Random Forest specifically
+python incremental_train.py    # Incremental / streaming updates
+```
+
+### Run prediction server
+```bash
+python ml_ec2_service.py
+```
+
+### Test predictions
+```bash
+python test_predict.py
+```
+
+Saved artifacts in `artifacts/` and `rf_artifacts/` are loaded automatically
+at startup.
+
+---
+
+## 🖥️ Monitor App (`monitor_app/`)
+
+A **Next.js** dashboard that visualizes live predictions from the ML service.
+The `network_agent/` captures packets using Scapy, extracts flow features,
+and sends them to the ML API.
+```bash
+cd monitor_app
+npm install
+npm run dev        # http://localhost:3000
+```
+
+---
+
+
+## 🔄 System Workflow
+```
+[Target Website :5000]  ←── normal/attack traffic ───  [simulate_attack.py]
+         │
+         ▼
+[network_agent (Scapy)] ── packet capture + feature extraction
+         │
+         ▼  HTTP POST
+[ML Service :8080]  ── preprocess → RF predict → return label
+         │
+         ▼
+[Monitor App :3000]  ── display real-time results
+```
+
+
+---
+
+## 📊 Results Summary
+
+- Best standalone model: **Decision Tree** (86.4% accuracy)
+- Highest recall for attack detection: **Random Forest** (97.2%)
+- GAN augmentation showed degraded performance due to distribution mismatch
+  — selective class-conditional GAN is recommended for improvement
+
+---
+
+## 🛠️ Requirements
+```
+Python 3.8+
+Flask
+scikit-learn
+pandas, numpy
+tensorflow (for GAN in notebook)
+torch (for AutoEncoder in ml_service)
+scapy (for network_agent)
+joblib
+```
+
+---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ## 🚀 One-Click AWS Deployment
 
