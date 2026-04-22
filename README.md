@@ -24,27 +24,39 @@ The **ML Cyber Attack Prediction System** is a comprehensive, local solution for
 ```text
 CyberAttackPrediction/
 ├── target_website/
-│   ├── app.py                  # Flask demo web application (port 5000)
-│   └── simulate_attack.py      # Generates DDoS, SQLi, Port Scan, Brute Force traffic
+│   └── app.py                  # Vulnerable Flask demo web application (port 5000)
 │
 ├── ml_service/
-│   ├── ml_ec2_service.py       # Flask ML prediction API (port 8080)
-│   ├── train_rf_model.py       # Random Forest model trainer script
-│   ├── config.py               # ML Configuration
-│   ├── requirements.txt
-│   └── rf_artifacts/           # Saved Model Binaries
-│       ├── rf_model.pkl
-│       ├── scaler.pkl
-│       └── label_encoder.pkl
+│   ├── ml_ec2_service.py       # Flask REST API serving Random Forest predictions (port 8080)
+│   ├── train_rf_model.py       # Script to train and export the Random Forest model
+│   ├── config.py               # Central configuration for ML service thresholds and ports
+│   ├── requirements.txt        # Python dependencies for the ML backend
+│   └── rf_artifacts/           # Directory storing compiled model binaries
+│       ├── rf_model.pkl        # The trained Random Forest classifier
+│       ├── scaler.pkl          # Feature standard scaler for data normalization
+│       └── label_encoder.pkl   # Label encoder for KDD categorical metrics
 │
-└── monitor_app/
-    ├── app/                    # Next.js Dashboard UI (port 3000)
-    │   ├── page.tsx            # Main Web UI + Alert Sound System
-    │   ├── globals.css         # Animations & UI tokens
-    │   └── api/                # Dashboard internal REST APIs
-    └── network_agent/          
-        ├── network_monitor_agent.py  # Python Scapy packet sniffer
-        └── requirements.txt
+├── monitor_app/
+│   ├── package.json            # Node.js dependencies and run scripts
+│   ├── app/                    # Next.js Source Directory
+│   │   ├── layout.tsx          # Root HTML layout and metadata for the dashboard
+│   │   ├── page.tsx            # Main React UI, Attack Tracker, and Audio Alarm system
+│   │   ├── globals.css         # Tailwind directives and custom pulse animations
+│   │   └── api/                
+│   │       ├── predictions/route.ts # Endpoint receiving live threats from Network Agent
+│   │       └── ml-status/route.ts   # Endpoint proxying health checks to the ML Service
+│   └── network_agent/          
+│       ├── network_monitor_agent.py # Scapy-based Python sniffer, DPI Engine, and API dispatcher
+│       └── requirements.txt         # Python dependencies for the packet agent
+│
+├── simulate_attack.py          # Primary test script to launch DDoS, SQLi, Brute Force against target
+├── send_test_attacks.py        # Lightweight alternative script for isolated attack testing
+├── test_attacks_clean.py       # Refined scripting for clean traffic flow simulations
+├── IDS.ipynb                   # Jupyter notebook containing full training, evaluation, and pipeline logic
+├── kdd_train.csv               # Standard NSL-KDD dataset used for training the Random Forest
+├── kdd_test.csv                # Standard NSL-KDD testing suite for model validation
+├── new_architecture.png        # Latest visual architecture and workflow diagram
+└── README.md                   # This comprehensive documentation file
 ```
 
 ---
