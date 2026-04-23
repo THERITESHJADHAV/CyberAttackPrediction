@@ -12,6 +12,7 @@ The **ML Cyber Attack Prediction System** is a comprehensive, local solution for
 - **Machine Learning Detection**: Uses a trained **Random Forest** model on KDD-style metrics to classify benign vs. malicious traffic.
 - **Intelligent Payload Decoding**: Unpacks URL-encodings to run Deep Packet Inspection (DPI) signatures against SQL Injection, Path Traversal, and Brute Force attacks.
 - **Web Dashboard**: Modern **Next.js** glassmorphism interface for visualizing threats.
+- **Geographical Threat Map**: Real-time **Leaflet.js** global map visualizing attacker IP origins using `ip-api.com` with pulsating severity markers.
 - **Active Alerting**: Triggers real-time visual toast notifications and **audible alarms** via the Web Audio API on attack detection.
 
 ---
@@ -36,14 +37,16 @@ CyberAttackPrediction/
 ├── monitor_app/
 │   ├── package.json            # Node.js dependencies and run scripts
 │   ├── app/                    # Next.js Source Directory
-│   │   ├── layout.tsx          # Root HTML layout and metadata for the dashboard
-│   │   ├── page.tsx            # Main React UI, Attack Tracker, and Audio Alarm system
-│   │   ├── globals.css         # Tailwind directives and custom pulse animations
+│   │   ├── layout.tsx          # Root HTML layout (includes Leaflet.js CDN)
+│   │   ├── page.tsx            # Main React UI, Threat Map, and Audio Alarm system
+│   │   ├── globals.css         # Tailwind directives and custom map/pulse animations
 │   │   └── api/                
+│   │       ├── predictionStore.ts   # Shared in-memory state for tracking predictions globally
 │   │       ├── predictions/route.ts # Endpoint receiving live threats from Network Agent
+│   │       ├── geo/route.ts         # Endpoint for resolving IP geolocation
 │   │       └── ml-status/route.ts   # Endpoint proxying health checks to the ML Service
 │   └── network_agent/          
-│       ├── network_monitor_agent.py # Scapy-based Python sniffer, DPI Engine, and API dispatcher
+│       ├── network_monitor_agent.py # Scapy-based Python sniffer (forces UTF-8), DPI Engine, API dispatcher
 │       └── requirements.txt         # Python dependencies for the packet agent
 │
 ├── simulate_attack.py          # Primary test script to launch DDoS, SQLi, Brute Force against target
