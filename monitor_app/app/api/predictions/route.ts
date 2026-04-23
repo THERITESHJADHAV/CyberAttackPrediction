@@ -1,35 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-
-/* ── In-memory prediction store ── */
-interface PredictionEntry {
-  id: string;
-  timestamp: string;
-  srcIp: string;
-  dstIp: string;
-  srcPort: number;
-  dstPort: number;
-  protocol: string;
-  packets: number;
-  bytes: number;
-  duration: number;
-  connState: string;
-  prediction: number;        // 0 = safe, 1 = attack
-  attackProbability: number;  // 0.0 – 1.0
-  featuresUsed: string[];
-  featureSelectionEnabled: boolean;
-}
-
-const MAX_ENTRIES = 200;
-let predictions: PredictionEntry[] = [];
-let idCounter = 0;
+import { addPrediction, getPredictions } from "../predictionStore";
 
 /* ── POST: Agent pushes a new prediction ── */
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
 
-    const entry: PredictionEntry = {
-      id: `pred_${++idCounter}`,
+    const id = addPrediction({
       timestamp: body.timestamp || new Date().toISOString(),
       srcIp: body.src_ip || body.srcIp || "unknown",
       dstIp: body.dst_ip || body.dstIp || "unknown",
@@ -44,14 +21,9 @@ export async function POST(req: NextRequest) {
       attackProbability: Number(body.attack_probability ?? body.attackProbability ?? 0),
       featuresUsed: body.features_used || [],
       featureSelectionEnabled: body.feature_selection_enabled ?? false,
-    };
+    });
 
-    predictions.unshift(entry);
-    if (predictions.length > MAX_ENTRIES) {
-      predictions = predictions.slice(0, MAX_ENTRIES);
-    }
-
-    return NextResponse.json({ success: true, id: entry.id });
+    return NextResponse.json({ success: true, id });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 400 });
@@ -62,8 +34,10 @@ export async function POST(req: NextRequest) {
 export async function GET(req: NextRequest) {
   const url = new URL(req.url);
   const since = url.searchParams.get("since"); // ISO timestamp
+  const MAX_ENTRIES = 200;
   const limit = Math.min(Number(url.searchParams.get("limit") || 100), MAX_ENTRIES);
 
+  const predictions = getPredictions();
   let results = predictions;
 
   if (since) {

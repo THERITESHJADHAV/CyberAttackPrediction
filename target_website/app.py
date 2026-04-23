@@ -13,6 +13,13 @@ from flask import Flask, render_template_string, jsonify, request
 import random
 import time
 import os
+import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 app = Flask(__name__)
 

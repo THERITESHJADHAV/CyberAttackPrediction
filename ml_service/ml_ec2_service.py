@@ -9,6 +9,13 @@ Endpoints:
     GET  /health   — Health check
 """
 
+import sys
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 from flask import Flask, request, jsonify  # type: ignore
 import numpy as np  # type: ignore
 import pandas as pd  # type: ignore

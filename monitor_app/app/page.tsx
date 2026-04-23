@@ -48,6 +48,21 @@ interface AttackNotification {
   dismissed: boolean;
 }
 
+interface GeoAttacker {
+  ip: string;
+  lat: number;
+  lon: number;
+  city: string;
+  country: string;
+  attackProbability: number;
+  attackCount: number;
+  lastSeen: string;
+  isLocal: boolean;
+}
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+declare const L: any;
+
 /* ─── Helpers ─── */
 const formatTime = (d: Date | string) => {
   const date = typeof d === "string" ? new Date(d) : d;
@@ -186,6 +201,13 @@ export default function Dashboard() {
   const [notifHistory, setNotifHistory] = useState<AttackNotification[]>([]);
   const soundSystemRef = useRef<AlertSoundSystem | null>(null);
   const processedAttackIdsRef = useRef<Set<string>>(new Set());
+
+  /* ─── Geo Threat Map State ─── */
+  const [geoAttackers, setGeoAttackers] = useState<GeoAttacker[]>([]);
+  const mapContainerRef = useRef<HTMLDivElement>(null);
+  const mapInstanceRef = useRef<any>(null);
+  const markersLayerRef = useRef<any>(null);
+  const linesLayerRef = useRef<any>(null);
 
   /* Initialize sound system and interaction listener */
   useEffect(() => {
@@ -426,6 +448,169 @@ export default function Dashboard() {
     const interval = setInterval(check, 10000);
     return () => clearInterval(interval);
   }, []);
+
+  /* ─── Poll Geo API ─── */
+  useEffect(() => {
+    const pollGeo = async () => {
+      try {
+        const res = await fetch("/api/geo", { cache: "no-store" });
+        if (res.ok) {
+          const data = await res.json();
+          setGeoAttackers(data.attackers || []);
+        }
+      } catch {
+        /* silently retry */
+      }
+    };
+
+    pollGeo();
+    const interval = setInterval(pollGeo, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  /* ─── Initialize & Update Leaflet Map ─── */
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof L === "undefined") return;
+    if (!mapContainerRef.current) return;
+
+    // Initialize map only once
+    if (!mapInstanceRef.current) {
+      const map = L.map(mapContainerRef.current, {
+        center: [20, 0],
+        zoom: 2,
+        minZoom: 2,
+        maxZoom: 8,
+        zoomControl: true,
+        attributionControl: true,
+        scrollWheelZoom: true,
+      });
+
+      // CartoDB Dark Matter tiles
+      L.tileLayer(
+        "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+        {
+          attribution: '&copy; <a href="https://carto.com/">CARTO</a>',
+          subdomains: "abcd",
+          maxZoom: 19,
+        }
+      ).addTo(map);
+
+      // Create layer groups for markers and lines
+      markersLayerRef.current = L.layerGroup().addTo(map);
+      linesLayerRef.current = L.layerGroup().addTo(map);
+
+      mapInstanceRef.current = map;
+
+      // Fix Leaflet resize issues
+      setTimeout(() => map.invalidateSize(), 200);
+    }
+
+    // Update markers
+    const markers = markersLayerRef.current;
+    const lines = linesLayerRef.current;
+    if (!markers || !lines) return;
+
+    markers.clearLayers();
+    lines.clearLayers();
+
+    // Server marker (your location — centered in India as configured)
+    const serverLat = 19.076;
+    const serverLon = 72.8777;
+    const serverIcon = L.divIcon({
+      className: "",
+      html: `<div style="width:20px;height:20px;border-radius:50%;background:radial-gradient(circle,#06b6d4 30%,rgba(6,182,212,0.3) 100%);border:3px solid rgba(6,182,212,0.6);box-shadow:0 0 20px rgba(6,182,212,0.5),0 0 40px rgba(6,182,212,0.2);animation:serverPulse 3s ease-in-out infinite;"></div>`,
+      iconSize: [20, 20],
+      iconAnchor: [10, 10],
+    });
+    const serverMarker = L.marker([serverLat, serverLon], { icon: serverIcon, zIndexOffset: 1000 });
+    serverMarker.bindTooltip(
+      `<div class="attack-tooltip"><div class="tooltip-ip">🛡️ Your Server</div><div class="tooltip-location">Mumbai, India</div></div>`,
+      { className: "attack-tooltip", direction: "top", offset: [0, -14] }
+    );
+    markers.addLayer(serverMarker);
+
+    // Add attacker markers
+    geoAttackers.forEach((attacker) => {
+      const severity =
+        attacker.attackProbability > 0.8
+          ? "critical"
+          : attacker.attackProbability > 0.5
+          ? "high"
+          : "medium";
+
+      const markerSize =
+        severity === "critical" ? 20 : severity === "high" ? 16 : 12;
+
+      const colors: Record<string, {bg: string; border: string; shadow: string}> = {
+        critical: { bg: "radial-gradient(circle,#ef4444 35%,rgba(239,68,68,0.4) 100%)", border: "rgba(239,68,68,0.7)", shadow: "0 0 20px rgba(239,68,68,0.6),0 0 40px rgba(239,68,68,0.25)" },
+        high: { bg: "radial-gradient(circle,#f97316 35%,rgba(249,115,22,0.4) 100%)", border: "rgba(249,115,22,0.7)", shadow: "0 0 16px rgba(249,115,22,0.5),0 0 30px rgba(249,115,22,0.2)" },
+        medium: { bg: "radial-gradient(circle,#f59e0b 35%,rgba(245,158,11,0.4) 100%)", border: "rgba(245,158,11,0.6)", shadow: "0 0 12px rgba(245,158,11,0.4)" },
+      };
+      const c = colors[severity];
+
+      const icon = L.divIcon({
+        className: "",
+        html: `<div style="width:${markerSize}px;height:${markerSize}px;border-radius:50%;background:${c.bg};border:2px solid ${c.border};box-shadow:${c.shadow};animation:markerPulse${severity === 'critical' ? 'Critical' : ''} ${severity === 'critical' ? '1.5' : '2'}s ease-in-out infinite;cursor:pointer;"></div>`,
+        iconSize: [markerSize, markerSize],
+        iconAnchor: [markerSize / 2, markerSize / 2],
+      });
+
+      const marker = L.marker([attacker.lat, attacker.lon], {
+        icon,
+        zIndexOffset: severity === "critical" ? 900 : severity === "high" ? 800 : 700,
+      });
+
+      // Tooltip
+      const probPercent = (attacker.attackProbability * 100).toFixed(1);
+      marker.bindTooltip(
+        `<div class="attack-tooltip">` +
+          `<div class="tooltip-ip">${attacker.ip}</div>` +
+          `<div class="tooltip-location">📍 ${attacker.city}, ${attacker.country}</div>` +
+          `<div class="tooltip-prob ${severity}">🎯 ${probPercent}% threat · ${attacker.attackCount} attacks</div>` +
+        `</div>`,
+        { className: "attack-tooltip", direction: "top", offset: [0, -(markerSize / 2 + 4)] }
+      );
+
+      // Popup with details
+      marker.bindPopup(
+        `<div>` +
+          `<div class="popup-title">${severity === "critical" ? "🚨" : severity === "high" ? "⚠️" : "🔶"} Attacker Details</div>` +
+          `<div class="popup-row"><span class="popup-label">IP Address</span><span class="popup-value">${attacker.ip}</span></div>` +
+          `<div class="popup-row"><span class="popup-label">Location</span><span class="popup-value">${attacker.city}, ${attacker.country}</span></div>` +
+          `<div class="popup-row"><span class="popup-label">Coordinates</span><span class="popup-value">${attacker.lat.toFixed(2)}, ${attacker.lon.toFixed(2)}</span></div>` +
+          `<div class="popup-row"><span class="popup-label">Threat Level</span><span class="popup-value" style="color:${severity === "critical" ? "#ef4444" : severity === "high" ? "#f97316" : "#f59e0b"}">${probPercent}%</span></div>` +
+          `<div class="popup-row"><span class="popup-label">Attack Count</span><span class="popup-value">${attacker.attackCount}</span></div>` +
+          `<div class="popup-row"><span class="popup-label">Last Seen</span><span class="popup-value">${new Date(attacker.lastSeen).toLocaleTimeString()}</span></div>` +
+          `<div class="popup-row"><span class="popup-label">Source</span><span class="popup-value">${attacker.isLocal ? "Local (Demo)" : "Real GeoIP"}</span></div>` +
+        `</div>`,
+        { maxWidth: 300 }
+      );
+
+      markers.addLayer(marker);
+
+      // Connection line from attacker to server
+      const lineColor =
+        severity === "critical"
+          ? "rgba(239, 68, 68, 0.4)"
+          : severity === "high"
+          ? "rgba(249, 115, 22, 0.3)"
+          : "rgba(245, 158, 11, 0.25)";
+
+      const line = L.polyline(
+        [
+          [attacker.lat, attacker.lon],
+          [serverLat, serverLon],
+        ],
+        {
+          color: lineColor,
+          weight: severity === "critical" ? 2.5 : 2,
+          dashArray: severity === "critical" ? "8,4" : "6,4",
+          opacity: 0.9,
+        }
+      );
+      lines.addLayer(line);
+    });
+  }, [geoAttackers]);
 
   /* Compute threat level from all flows */
   useEffect(() => {
@@ -736,6 +921,7 @@ export default function Dashboard() {
         </section>
 
         {/* ── Flow Table ── */}
+        {/* NOTE: Global Threat Map is placed after the flow table below */}
         <section className="panel" style={{ marginBottom: 28 }}>
           <div className="panel-header">
             <span className="panel-title">
@@ -796,6 +982,71 @@ export default function Dashboard() {
                 )}
               </tbody>
             </table>
+          </div>
+        </section>
+
+        {/* ── Global Threat Map ── */}
+        <section className="threat-map-section" id="threat-map-section">
+          <div className="panel threat-map-container">
+            <div className="panel-header">
+              <span className="panel-title">
+                <span className="panel-title-icon">🌍</span>
+                Global Threat Map
+              </span>
+              <span className="panel-badge live">● LIVE</span>
+            </div>
+            <div className="threat-map" style={{ position: "relative" }}>
+              <div ref={mapContainerRef} style={{ width: "100%", height: "100%" }} id="threat-map" />
+              {geoAttackers.length === 0 && (
+                <div className="map-empty">
+                  <div className="map-empty-icon">🌐</div>
+                  <div className="map-empty-text">No attack origins detected yet</div>
+                  <div className="map-empty-sub">Attacker locations will appear when threats are identified</div>
+                </div>
+              )}
+            </div>
+            <div className="map-stats">
+              <div className="map-stat">
+                <span>🎯 Active Attackers:</span>
+                <span className="map-stat-value">{geoAttackers.length}</span>
+              </div>
+              <div className="map-stat">
+                <span>🚨 Critical:</span>
+                <span className="map-stat-value" style={{ color: "var(--accent-red)" }}>
+                  {geoAttackers.filter((a) => a.attackProbability > 0.8).length}
+                </span>
+              </div>
+              <div className="map-stat">
+                <span>⚠️ High:</span>
+                <span className="map-stat-value" style={{ color: "#f97316" }}>
+                  {geoAttackers.filter((a) => a.attackProbability > 0.5 && a.attackProbability <= 0.8).length}
+                </span>
+              </div>
+              <div className="map-stat">
+                <span>🌍 Countries:</span>
+                <span className="map-stat-value">
+                  {new Set(geoAttackers.map((a) => a.country)).size}
+                </span>
+              </div>
+            </div>
+            <div className="map-legend">
+              <div className="legend-item">
+                <span className="legend-dot critical" />
+                <span>Critical (&gt;80%)</span>
+              </div>
+              <div className="legend-item">
+                <span className="legend-dot high" />
+                <span>High (&gt;50%)</span>
+              </div>
+              <div className="legend-item">
+                <span className="legend-dot medium" />
+                <span>Medium</span>
+              </div>
+              <div className="legend-item">
+                <span className="legend-dot server" />
+                <span>Your Server</span>
+              </div>
+            </div>
           </div>
         </section>
 

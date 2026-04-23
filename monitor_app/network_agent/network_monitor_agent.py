@@ -41,7 +41,13 @@ import queue
 # Scapy imports
 from scapy.all import sniff, IP, TCP, UDP  # type: ignore
 
-# Configure logging
+# Configure logging (force UTF-8 for Windows terminal emoji support)
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
