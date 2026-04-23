@@ -1,8 +1,5 @@
 # 🛡️ ML Cyber Attack Prediction System
 
-## 📺 Video Tutorial
-**[Watch the Complete Video Tutorial on YouTube](https://youtu.be/3-mH1ynRf7U)** - Step-by-step guide for setting up and deploying the entire system.
-
 ## 🌟 Project Overview
 
 The **ML Cyber Attack Prediction System** is a comprehensive, local solution for real-time network traffic analysis and cyber attack detection using machine learning. This system combines Random Forest classification with live deep packet inspection to provide robust network security monitoring, immediate threat prediction, and audible alerting capabilities.
